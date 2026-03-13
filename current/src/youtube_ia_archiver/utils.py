@@ -38,26 +38,11 @@ def setup_logging(config, verbose: bool):
     return logger
 
 
-def send_notification(config, level: str, message: str):
-    """
-    Sends a summary notification via the shared DaGhE Telegram helper.
-    """
-    if not config.get("telegram", "enabled", default=True):
-        return
-
-    helper_path = config.get("paths", "telegram_helper")
-    if not helper_path or not os.path.exists(helper_path):
-        logging.warning(f"Telegram helper not found at: {helper_path}")
-        return
-
-    try:
-        subprocess.run([helper_path, level.lower(), message], check=True)
-    except Exception as e:
-        logging.error(f"Failed to dispatch Telegram notification: {e}")
-
-
 def get_dir_size_human(directory: Path) -> str:
-    """Calculates human-readable size of a directory."""
+    """
+    Calculates the human-readable size of a directory.
+    UK English: Standardises units for archival reporting.
+    """
     total_size = 0
     if not directory.exists():
         return "0 B"
