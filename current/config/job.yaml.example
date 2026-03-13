@@ -1,11 +1,14 @@
 job_name: "daghe-youtube-ia-archiver"
 
-playlist_url: "https://www.youtube.com/playlist?list=YOUR_UNLISTED_PLAYLIST_ID"
+# The unlisted or public playlist to monitor
+playlist_url: "https://www.youtube.com/playlist?list=YOUR_PLAYLIST_ID"
 
 ia_settings:
   collection: "opensource_movies"
-  # Keys must be in this file as IA_ACCESS_KEY and IA_SECRET_KEY
+  # S3 Keys must be in this file as IA_ACCESS_KEY and IA_SECRET_KEY
   credentials_file: "${BASE_DIR}/config/ia.env"
+  # Prefix template for the Internet Archive description
+  description_template: "config/description_prefix.txt"
 
 paths:
   data_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data"
@@ -13,8 +16,20 @@ paths:
   temp_work_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/tmp"
   telegram_helper: "${BASE_DIR}/bin/telegram-notify.sh"
 
+yt_dlp:
+  # Reusing the shared cookie strategy
+  cookie_file: "${BASE_DIR}/config/cookies/daghe-youtube-search-metadata.txt"
+  extra_ydl_opts:
+    format: "bestvideo+bestaudio/best"
+    writesubtitles: true
+    subtitleslangs: ["en.*", "it.*"]
+    write_auto_subs: false
+    ignore_no_formats_error: true
+    sleep_interval_requests: 2
+
 git:
   enabled: true
+  branch: "main"
   auto_push: true
   commit_message_template: "ia-archiver: {new_count} videos archived"
 
