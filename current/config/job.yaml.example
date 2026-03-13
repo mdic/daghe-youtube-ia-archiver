@@ -1,0 +1,23 @@
+job_name: "daghe-youtube-ia-archiver"
+
+playlist_url: "https://www.youtube.com/playlist?list=YOUR_UNLISTED_PLAYLIST_ID"
+
+ia_settings:
+  collection: "opensource_movies"
+  # Keys must be in this file as IA_ACCESS_KEY and IA_SECRET_KEY
+  credentials_file: "${BASE_DIR}/config/ia.env"
+
+paths:
+  data_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data"
+  archive_file: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_videos.txt"
+  temp_work_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/tmp"
+  telegram_helper: "${BASE_DIR}/bin/telegram-notify.sh"
+
+git:
+  enabled: true
+  auto_push: true
+  commit_message_template: "ia-archiver: {new_count} videos archived"
+
+telegram:
+  enabled: true
+  notify_on_success: true

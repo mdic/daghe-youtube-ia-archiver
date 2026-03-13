@@ -1,0 +1,20 @@
+module:
+  name: "daghe-youtube-ia-archiver"
+  description: "Monitor unlisted playlists and archive to Internet Archive"
+  type: "python"
+  entrypoint: "youtube_ia_archiver.cli"
+  params: "--config config/job.yaml"
+
+schedule:
+  calendar: "daily"
+  random_delay: "2h"
+
+updates:
+  auto_upgrade_packages:
+    - "tubeup"
+    - "yt-dlp"
+    - "internetarchive"
+
+git:
+  code_repo: "https://github.com/mdic/daghe-youtube-ia-archiver.git"
+  data_repo: "git@github.com:youruser/daghe-youtube-ia-archiver-data.git"
