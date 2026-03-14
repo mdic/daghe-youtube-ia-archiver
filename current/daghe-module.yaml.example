@@ -11,7 +11,6 @@ schedule:
 
 updates:
   auto_upgrade_packages:
-    - "tubeup"
     - "yt-dlp"
     - "internetarchive"
 
