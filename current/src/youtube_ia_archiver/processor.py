@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -107,6 +108,14 @@ class ArchiveProcessor:
             local_opts = self.ydl_opts.copy()
             local_opts["extract_flat"] = False
             local_opts["outtmpl"] = f"{work_dir}/%(title)s.%(ext)s"
+
+            logger.info(
+                f"DEBUG - Initialising yt-dlp with the following options for {video_id}:"
+            )
+            # Log the options in JSON format for readability (excluding binary data if present)
+            logger.info(
+                json.dumps({k: str(v) for k, v in local_opts.items()}, indent=4)
+            )
 
             logger.info(f"Downloading assets for {video_id} (URL: {video_url})...")
             with yt_dlp.YoutubeDL(local_opts) as ydl:
