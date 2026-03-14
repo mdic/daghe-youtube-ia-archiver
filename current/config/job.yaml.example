@@ -20,6 +20,7 @@ yt_dlp:
   # Reusing the shared cookie strategy
   cookie_file: "${BASE_DIR}/config/cookies/daghe-youtube-search-metadata.txt"
   extra_ydl_opts:
+    js_runtime: "deno"
     # Prefer non-AI-upscaled videos, as of today identified with format_id containing "-sr"
     format: "bestvideo[format_id!*=sr]+bestaudio/best[format_id!*=sr]"
     subtitleslangs:
