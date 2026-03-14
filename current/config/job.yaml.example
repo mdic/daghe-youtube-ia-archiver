@@ -22,11 +22,14 @@ yt_dlp:
   extra_ydl_opts:
     # Prefer non-AI-upscaled videos, as of today identified with format_id containing "-sr"
     format: "bestvideo[format_id!*=sr]+bestaudio/best[format_id!*=sr]"
+    subtitleslangs:
+        - "en.*"
+        - "it.*"
     writesubtitles: true
-    subtitleslangs: ["en.*", "it.*"]
     write_auto_subs: false
     ignore_no_formats_error: false
     sleep_interval_requests: 2
+    check_formats: true
 
 git:
   enabled: true
