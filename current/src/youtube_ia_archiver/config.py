@@ -53,6 +53,19 @@ class JobConfig:
             self.raw.get("ia_settings", {}).get("credentials_file")
         )
 
+    # --- INVENTORY PROPERTIES ---
+    @property
+    def inventory_enabled(self) -> bool:
+        return self.raw.get("inventory", {}).get("enabled", False)
+
+    @property
+    def inventory_file(self) -> Path:
+        return self._expand_path(self.raw.get("inventory", {}).get("file"))
+
+    @property
+    def inventory_columns(self) -> list:
+        return self.raw.get("inventory", {}).get("columns", ["id", "title"])
+
     def get(self, *keys, default=None):
         data = self.raw
         for key in keys:

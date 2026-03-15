@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
@@ -11,13 +12,9 @@ logger = logging.getLogger(__name__)
 
 
 class YdlLogger:
-    """
-    Helper to redirect yt-dlp logs to the DaGhE logging system.
-    UK English spelling.
-    """
+    """Helper to redirect yt-dlp logs to the DaGhE logging system."""
 
     def debug(self, msg):
-        # Filter out noisy debug messages but keep relevant info
         if msg.startswith("[debug] "):
             pass
         else:
@@ -36,12 +33,11 @@ class YdlLogger:
 class ArchiveProcessor:
     def __init__(self, config):
         """
-        Initialise the processor with authenticated session and JS runtime.
-        UK English: Robust handling for YouTube n-parameter challenges.
+        Initialise the processor.
+        UK English spelling. Robust handling for YouTube challenges and metadata.
         """
         self.config = config
 
-        # 1. Base default options
         self.ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -52,19 +48,16 @@ class ArchiveProcessor:
             "logger": YdlLogger(),
         }
 
-        # 2. Merge Global YAML options (including js_runtime: "deno")
         global_extras = self.config.global_ydl_opts
         if global_extras:
             self._apply_extra_opts(global_extras)
 
-        # 3. Apply Authentication
         cookie_path = self.config.ydl_cookie_file
         if cookie_path and os.path.exists(cookie_path):
             self.ydl_opts["cookiefile"] = os.path.abspath(cookie_path)
-            logger.info(f"Authenticated session enabled via: {cookie_path}")
+            logger.info(f"Using shared cookies from: {cookie_path}")
 
     def _apply_extra_opts(self, extras: dict):
-        """Standardise YAML types for the yt-dlp Python API."""
         for k, v in extras.items():
             if isinstance(v, str):
                 if v.lower() == "true":
@@ -74,7 +67,6 @@ class ArchiveProcessor:
             self.ydl_opts[k] = v
 
     def get_playlist_video_ids(self) -> list:
-        """Scan playlist for IDs using flat extraction mode."""
         scan_opts = self.ydl_opts.copy()
         scan_opts.update(
             {
@@ -91,60 +83,72 @@ class ArchiveProcessor:
             logger.error(f"Playlist synchronisation failed: {e}")
             return []
 
-    def _prepare_metadata(self, info: dict) -> dict:
-        """Prepare metadata schema for Internet Archive upload."""
-        title = info.get("title", "Unknown Title")
-        v_id = info.get("id")
-
-        # Resolve description template relative to module root
+    def _prepare_description(self, info: dict) -> str:
+        """
+        Constructs the final description for Internet Archive.
+        Includes prefix template with date, uploader info, and original description.
+        """
+        # 1. Load and format prefix template
         template_path = (
             Path(os.getcwd()) / self.config.raw["ia_settings"]["description_template"]
         )
-        prefix = (
-            template_path.read_text(encoding="utf-8") if template_path.exists() else ""
+        prefix = ""
+        if template_path.exists():
+            template_text = template_path.read_text(encoding="utf-8")
+            # Replace placeholders like {date}
+            prefix = template_text.format(
+                date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                title=info.get("title", "Unknown"),
+            )
+
+        # 2. Extract specific metadata for the body
+        uploader = info.get("uploader", "Unknown Account")
+        likes = info.get("like_count", "N/A")
+        orig_desc = info.get("description", "No description provided.")
+
+        # 3. Assemble the final standardised block
+        final_desc = (
+            f"{prefix}\n\n"
+            f"--- YouTube Metadata ---\n"
+            f"Uploaded by: {uploader}\n"
+            f"Likes at time of archival: {likes}\n\n"
+            f"--- Original Description ---\n"
+            f"{orig_desc}"
         )
+        return final_desc
 
-        return {
-            "title": title,
-            "description": f"{prefix}\n\n{info.get('description', '')}",
-            "mediatype": "movies",
-            "collection": self.config.get("ia_settings", "collection"),
-            "external-identifier": f"youtube:{v_id}",
-            "originalurl": f"https://www.youtube.com/watch?v={v_id}",
-            "creator": info.get("uploader", "Unknown"),
-        }
-
-    def process_video(self, video_id: str, dry_run: bool = False) -> bool:
-        """Archival pipeline: Metadata fetch -> Asset Download -> IA Upload -> Cleanup."""
+    def process_video(
+        self, video_id: str, dry_run: bool = False
+    ) -> tuple[bool, dict | None]:
+        """
+        Returns (Success Boolean, Metadata Dict).
+        """
         work_dir = self.config.temp_work_dir / video_id
         video_url = f"https://www.youtube.com/watch?v={video_id}"
 
         if dry_run:
             logger.info(f"[Dry-run] Archival simulation for: {video_id}")
-            return True
+            return True, None
 
         if work_dir.exists():
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 1. Download assets with JS challenge solver enabled
             local_opts = self.ydl_opts.copy()
             local_opts["outtmpl"] = f"{work_dir}/%(title)s.%(ext)s"
 
-            logger.info(f"Initiating archival process for {video_id}...")
-
+            logger.info(f"Initiating archival for {video_id}...")
             with yt_dlp.YoutubeDL(local_opts) as ydl:
-                # This performs metadata extraction AND media download
                 info = ydl.extract_info(video_url, download=True)
                 title = info.get("title", "Unknown Title")
 
-            # 2. Refine metadata naming (info.json -> Title.json)
+            # Rename info.json to Title.json
             info_json = work_dir / f"{title}.info.json"
             if info_json.exists():
                 shutil.move(str(info_json), str(work_dir / f"{title}.json"))
 
-            # 3. Load Internet Archive Credentials
+            # Load IA Credentials
             ia_creds = {}
             if self.config.credentials_file.exists():
                 for line in self.config.credentials_file.read_text().splitlines():
@@ -152,34 +156,37 @@ class ArchiveProcessor:
                         k, v = line.strip().split("=", 1)
                         ia_creds[k] = v.strip('"').strip("'")
 
-            # 4. Upload payload to Internet Archive
+            # Upload to IA
             logger.info(f"Uploading assets to Internet Archive: {video_id}")
             files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
 
-            if not files_to_upload:
-                logger.error(f"No files found to upload for {video_id}.")
-                return False
+            ia_metadata = {
+                "title": title,
+                "description": self._prepare_description(info),
+                "mediatype": "movies",
+                "collection": self.config.get("ia_settings", "collection"),
+                "external-identifier": f"youtube:{video_id}",
+                "originalurl": video_url,
+                "creator": info.get("uploader", "Unknown"),
+            }
 
             responses = upload(
                 identifier=video_id,
                 files=files_to_upload,
-                metadata=self._prepare_metadata(info),
+                metadata=ia_metadata,
                 access_key=ia_creds.get("IA_ACCESS_KEY"),
                 secret_key=ia_creds.get("IA_SECRET_KEY"),
             )
 
             if all(r.status_code == 200 for r in responses):
                 logger.info(f"Archival successful for {video_id}")
-                return True
+                return True, info
 
-            logger.error(f"Internet Archive rejected assets for {video_id}")
-            return False
+            return False, None
 
         except Exception as e:
             logger.error(f"Archival failed for {video_id}: {str(e)}")
-            return False
+            return False, None
         finally:
-            # 5. Purge temporary files to save VPS disk space
             if work_dir.exists():
-                logger.info(f"Cleaning up temporary workspace: {work_dir}")
                 shutil.rmtree(work_dir)

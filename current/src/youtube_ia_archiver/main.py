@@ -1,3 +1,4 @@
+import csv
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -10,14 +11,41 @@ from .processor import ArchiveProcessor
 from .utils import get_dir_size_human
 
 
+def update_inventory(config, info: dict):
+    """
+    Appends a new row to the TSV inventory file.
+    UK English: Standardises archival records with customisable columns.
+    """
+    if not config.inventory_enabled or not info:
+        return
+
+    inventory_file = config.inventory_file
+    file_exists = inventory_file.exists()
+    columns = config.inventory_columns
+
+    # Custom mapping for calculated fields
+    custom_fields = {"ia_url": f"https://archive.org/details/{info.get('id')}"}
+
+    # Extract row data based on requested columns
+    row = {}
+    for col in columns:
+        # Check custom fields first, then yt-dlp info dict
+        row[col] = custom_fields.get(col, info.get(col, "N/A"))
+
+    try:
+        with open(inventory_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t")
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        logging.info(f"Inventory updated for video: {info.get('id')}")
+    except Exception as e:
+        logging.error(f"Failed to update inventory TSV: {e}")
+
+
 def run_job(config_path: str, dry_run: bool, verbose: bool):
-    """
-    Orchestrates the archival loop.
-    UK English: Initialises logging and aggregates results for reporting.
-    """
     config = load_config(config_path)
 
-    # 1. Setup Logging
     log_level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger()
     logger.setLevel(log_level)
@@ -43,24 +71,26 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     processed = 0
     failed = []
 
-    # 2. Pipeline Execution
     ids = processor.get_playlist_video_ids()
     to_do = [i for i in ids if not archive.is_processed(i)]
 
     logger.info(f"Processing cycle started. {len(to_do)} new videos detected.")
 
     for vid in to_do:
-        if processor.process_video(vid, dry_run=dry_run):
-            if not dry_run:
-                archive.add(vid)
+        # process_video now returns (success, info_dict)
+        success, info_dict = processor.process_video(vid, dry_run=dry_run)
+        if success and not dry_run:
+            archive.add(vid)
+            # Add to the custom TSV inventory
+            update_inventory(config, info_dict)
             processed += 1
-        else:
+        elif not success:
             failed.append(vid)
 
-    # 3. Synchronisation & Final Report
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
+
     status = (
         "success"
         if not failed and git_success

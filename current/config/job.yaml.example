@@ -32,6 +32,20 @@ yt_dlp:
     sleep_interval_requests: 2
     check_formats: true
 
+inventory:
+  enabled: true
+  file: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_inventory.tsv"
+  # List the columns you want.
+  # Use standard yt-dlp keys or 'ia_url' for the custom link.
+  columns:
+    - id
+    - title
+    - uploader
+    - upload_date
+    - like_count
+    - ia_url
+
+
 git:
   enabled: true
   branch: "main"
