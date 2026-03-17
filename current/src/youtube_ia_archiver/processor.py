@@ -175,7 +175,9 @@ class ArchiveProcessor:
         return metadata_context["description"]
 
     def get_playlist_video_ids(self) -> list:
-        # (Same as before, ensures flat scan for playlist discovery)
+        """
+        Scans the YouTube playlist and saves the metadata JSON to the data directory.
+        """
         scan_opts = self.ydl_opts.copy()
         scan_opts.update(
             {
@@ -184,9 +186,21 @@ class ArchiveProcessor:
                 "ignore_no_formats_error": True,
             }
         )
+
+        logger.info(f"Scanning playlist: {self.config.playlist_url}")
         try:
             with yt_dlp.YoutubeDL(scan_opts) as ydl:
                 result = ydl.extract_info(self.config.playlist_url, download=False)
+
+                # Path resolution for the playlist JSON (moving it to data/)
+                playlist_json_path = self.config.data_dir / "playlist_metadata.json"
+                with open(playlist_json_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, indent=4, ensure_ascii=False)
+                logger.info(
+                    f"Playlist metadata standardisation complete: {playlist_json_path}"
+                )
+
                 return [e["id"] for e in result.get("entries", []) if e.get("id")]
-        except Exception:
+        except Exception as e:
+            logger.error(f"Playlist synchronisation failed: {e}")
             return []
