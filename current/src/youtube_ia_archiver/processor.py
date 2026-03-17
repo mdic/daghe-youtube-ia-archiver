@@ -31,7 +31,7 @@ class YdlLogger:
 
 class ArchiveProcessor:
     def __init__(self, config):
-        """Initialise with authenticated session and UK English logging."""
+        """Initialise with authenticated session logic and UK English logging."""
         self.config = config
         self.ydl_opts = {
             "quiet": True,
@@ -66,6 +66,7 @@ class ArchiveProcessor:
     def get_playlist_video_ids(self) -> list:
         playlist_url = self.config.playlist_url
         data_dir = self.config.data_dir.absolute()
+
         scan_opts = self.ydl_opts.copy()
         scan_opts.update(
             {
@@ -78,66 +79,55 @@ class ArchiveProcessor:
             }
         )
 
+        logger.info(f"Scanning playlist: {playlist_url}")
         try:
             with yt_dlp.YoutubeDL(scan_opts) as ydl:
                 result = ydl.extract_info(playlist_url, download=False)
                 sanitized_result = ydl.sanitize_info(result)
                 playlist_id = result.get("id", "unknown")
                 playlist_json_path = data_dir / f"playlist_{playlist_id}.json"
+
                 with open(playlist_json_path, "w", encoding="utf-8") as f:
                     json.dump(sanitized_result, f, indent=4, ensure_ascii=False)
+
                 return [e["id"] for e in result.get("entries", []) if e.get("id")]
         except Exception as e:
-            logger.error(f"Playlist scan failed: {e}")
+            logger.error(f"Playlist synchronisation failed: {e}")
             return []
 
     def _archive_to_wayback(self, url: str) -> str:
-        """
-        UK English: Customised Wayback archival loop using waybackpy.
-        Respects timeout, polling, and max_wait settings from job.yaml.
-        """
+        """UK English: Customised Wayback archival loop respecting YAML timeouts."""
         if not self.config.wayback_enabled:
             return ""
 
         ua = self.config.wayback_user_agent
-
-        # Load custom timing settings
         timeout = self.config.get_timeout_setting("wayback", "timeout_seconds", 60)
         polling = self.config.get_timeout_setting("wayback", "polling_seconds", 20)
         max_wait = self.config.get_timeout_setting("wayback", "max_wait_seconds", 450)
 
-        # Set global socket timeout for this request
         socket.setdefaulttimeout(timeout)
-
-        logger.info(f"Initialising Wayback check/save for: {url}")
         start_time = time.time()
 
         try:
-            # 1. CDX Check: See if a recent version already exists
             cdx = WaybackMachineCDXServerAPI(url, ua)
             newest = cdx.newest()
             if newest and newest.archive_url:
-                logger.info(f"Existing Wayback snapshot found: {newest.archive_url}")
+                logger.info(f"Wayback snapshot exists: {newest.archive_url}")
                 return newest.archive_url
-        except Exception as e:
-            logger.debug(f"CDX lookup skipped or failed: {e}")
+        except Exception:
+            pass
 
-        # 2. Save Loop: Retry archival until success or max wait
         while (time.time() - start_time) < max_wait:
             try:
                 save_api = WaybackMachineSaveAPI(url, ua)
                 archived_url = save_api.save()
                 if archived_url:
-                    logger.info(f"New Wayback archival confirmed: {archived_url}")
+                    logger.info(f"Wayback archival confirmed: {archived_url}")
                     return archived_url
             except Exception as e:
-                logger.warning(
-                    f"Wayback save attempt failed: {e}. Retrying in {polling}s..."
-                )
-
+                logger.warning(f"Wayback retry in {polling}s due to: {e}")
             time.sleep(polling)
 
-        logger.error(f"Wayback Machine max wait ({max_wait}s) exceeded for {url}.")
         return "N/A"
 
     def _wait_for_ia_availability(self, identifier: str):
@@ -146,7 +136,7 @@ class ArchiveProcessor:
         start_time = time.time()
         while (time.time() - start_time) < max_wait:
             if get_item(identifier).exists:
-                logger.info(f"IA Item {identifier} verified live.")
+                logger.info(f"IA Item {identifier} is live.")
                 return True
             time.sleep(polling)
         return False
@@ -156,7 +146,7 @@ class ArchiveProcessor:
             Path(os.getcwd()).absolute()
             / self.config.raw["ia_settings"]["description_template"]
         )
-        ctx = {
+        metadata_context = {
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "title": info.get("title", "N/A"),
             "description": info.get("description", "N/A"),
@@ -164,41 +154,35 @@ class ArchiveProcessor:
             "likes": info.get("like_count", "N/A"),
         }
         try:
-            return (
-                template_path.read_text(encoding="utf-8").format(**ctx)
-                if template_path.exists()
-                else ctx["description"]
-            )
+            return template_path.read_text(encoding="utf-8").format(**metadata_context)
         except Exception:
-            return ctx["description"]
+            return metadata_context["description"]
 
     def process_video(
         self, video_id: str, dry_run: bool = False
     ) -> tuple[bool, dict | None, str]:
-        """Pipeline: Download -> Metadata -> Wayback -> IA Upload -> Cleanup."""
+        """Returns (Success Boolean, Metadata Dict, Wayback URL)."""
         work_dir = self.config.temp_work_dir.absolute() / video_id
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         ia_id = self._get_ia_identifier(video_id)
-        wayback_url = ""
 
         if dry_run:
-            logger.info(f"[Dry-run] Archival simulation for: {video_id}")
-            return True, None, "https://web.archive.org/web/dryrun"
+            logger.info(f"[Dry-run] Archiving: {video_id}")
+            return True, None, "https://web.archive.org/dryrun"
 
         if work_dir.exists():
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Step 1: yt-dlp Download
             local_opts = self.ydl_opts.copy()
             local_opts.update(
                 {
                     "outtmpl": {"default": str(work_dir / "%(title)s.%(ext)s")},
                     "paths": {"home": str(work_dir)},
-                    "writeinfojson": False,
                 }
             )
+
             with yt_dlp.YoutubeDL(local_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 info["ia_identifier"] = ia_id
@@ -211,10 +195,10 @@ class ArchiveProcessor:
             ) as f:
                 json.dump(sanitized_info, f, indent=4, ensure_ascii=False)
 
-            # Step 2: Wayback Archival (New Logic)
+            # Step: Wayback Archival
             wayback_url = self._archive_to_wayback(video_url)
 
-            # Step 3: IA Upload
+            # Step: IA Upload
             ia_creds = {}
             if self.config.credentials_file.exists():
                 for line in self.config.credentials_file.read_text().splitlines():
@@ -245,7 +229,7 @@ class ArchiveProcessor:
             return False, None, ""
 
         except Exception as e:
-            logger.error(f"Pipeline failure for {video_id}: {e}")
+            logger.error(f"Archival failed for {video_id}: {e}")
             return False, None, ""
         finally:
             if work_dir.exists():

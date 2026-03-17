@@ -29,7 +29,6 @@ class JobConfig:
 
     @property
     def inventory_file(self) -> Path:
-        """UK English: Resolves the TSV registry path from the paths section."""
         return self._expand_path(self.raw.get("paths", {}).get("inventory_tsv"))
 
     @property
@@ -43,11 +42,13 @@ class JobConfig:
 
     @property
     def ydl_cookie_file(self) -> str | None:
+        """Returns the absolute path to the shared cookie file."""
         path = self.raw.get("yt_dlp", {}).get("cookie_file")
         return os.path.expandvars(path) if path else None
 
     @property
     def global_ydl_opts(self) -> dict:
+        """Returns extra yt-dlp options from the YAML."""
         return self.raw.get("yt_dlp", {}).get("extra_ydl_opts", {})
 
     @property
@@ -60,15 +61,26 @@ class JobConfig:
     def inventory_enabled(self) -> bool:
         return self.raw.get("inventory", {}).get("enabled", False)
 
+    # --- WAYBACK MACHINE PROPERTIES ---
+    @property
+    def wayback_enabled(self) -> bool:
+        """UK English: Checks if Wayback Machine archival is enabled."""
+        return self.raw.get("wayback", {}).get("enabled", False)
+
+    @property
+    def wayback_user_agent(self) -> str:
+        return self.raw.get("wayback", {}).get("user_agent", "DaGhE Bot")
+
     @property
     def timeouts(self) -> dict:
-        """UK English: Returns the throttling and timeout settings."""
         return self.raw.get("timeouts", {})
 
     def get_timeout_setting(self, platform: str, key: str, default: int) -> int:
+        """Retrieves specific timeout or polling intervals from config."""
         return self.timeouts.get(platform, {}).get(key, default)
 
     def get(self, *keys, default=None):
+        """Deep get utility for nested dictionaries."""
         data = self.raw
         for key in keys:
             if isinstance(data, dict):

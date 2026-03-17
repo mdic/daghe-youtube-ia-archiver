@@ -20,7 +20,8 @@ def update_inventory(config, info: dict, wayback_url: str):
         return
 
     file_exists = file_path.exists()
-    header = ["youtube_id", "ia_identifier", "wayback_url", "ia_url", "youtube_title"]
+    # Headers exactly as requested: YT ID, IA ID, Wayback URL, YT Title
+    header = ["youtube_id", "ia_identifier", "wayback_url", "youtube_title"]
 
     video_id = info.get("id")
     ia_id = info.get("ia_identifier", f"yt-{video_id}")
@@ -29,7 +30,6 @@ def update_inventory(config, info: dict, wayback_url: str):
         "youtube_id": video_id,
         "ia_identifier": ia_id,
         "wayback_url": wayback_url,
-        "ia_url": f"https://archive.org/details/{ia_id}",
         "youtube_title": info.get("title", "Unknown Title"),
     }
 
@@ -40,7 +40,7 @@ def update_inventory(config, info: dict, wayback_url: str):
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
-        logging.info(f"Inventory synchronised: {video_id}")
+        logging.info(f"Inventory synchronised: {video_id} -> {wayback_url}")
     except Exception as e:
         logger.error(f"TSV update failed: {e}")
 
@@ -48,7 +48,6 @@ def update_inventory(config, info: dict, wayback_url: str):
 def run_job(config_path: str, dry_run: bool, verbose: bool):
     config = load_config(config_path)
 
-    # Standardised Logging
     log_level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger()
     logger.setLevel(log_level)
@@ -75,14 +74,13 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     processed = 0
     failed = []
 
-    # 1. Discover playlist
     ids = processor.get_playlist_video_ids()
     to_do = [i for i in ids if not archive.is_processed(i)]
 
     logger.info(f"Archival sequence initiated: {len(to_do)} new items.")
 
     for vid in to_do:
-        # Expected return: (Success, Info, WaybackURL)
+        # Success returns (True, info_dict, wayback_url)
         success, info, wb_url = processor.process_video(vid, dry_run=dry_run)
         if success and not dry_run:
             archive.add(vid)
@@ -91,7 +89,6 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
         elif not success:
             failed.append(vid)
 
-    # 3. Git Sync
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
@@ -101,7 +98,7 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
         else ("partial" if processed > 0 else "failure")
     )
 
-    summary = f"Job: {config.get('job_name')}\nArchived: {processed}\nGit: {git_msg}\nStatus: {status.upper()}"
+    summary = f"Job: {config.get('job_name')}\nArchived: {processed}\nStatus: {status.upper()}"
     if not dry_run:
         send_notification(
             config,
