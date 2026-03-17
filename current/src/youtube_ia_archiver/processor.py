@@ -12,8 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 class YdlLogger:
-    """Helper to redirect yt-dlp logs to the DaGhE logging system."""
-
     def debug(self, msg):
         if msg.startswith("[debug] "):
             pass
@@ -32,12 +30,8 @@ class YdlLogger:
 
 class ArchiveProcessor:
     def __init__(self, config):
-        """
-        Initialise the processor.
-        UK English spelling. Robust handling for YouTube challenges and metadata.
-        """
+        """Initialise with robust session options and UK English logging."""
         self.config = config
-
         self.ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -47,7 +41,6 @@ class ArchiveProcessor:
             "extract_flat": False,
             "logger": YdlLogger(),
         }
-
         global_extras = self.config.global_ydl_opts
         if global_extras:
             self._apply_extra_opts(global_extras)
@@ -55,7 +48,6 @@ class ArchiveProcessor:
         cookie_path = self.config.ydl_cookie_file
         if cookie_path and os.path.exists(cookie_path):
             self.ydl_opts["cookiefile"] = os.path.abspath(cookie_path)
-            logger.info(f"Using shared cookies from: {cookie_path}")
 
     def _apply_extra_opts(self, extras: dict):
         for k, v in extras.items():
@@ -80,49 +72,41 @@ class ArchiveProcessor:
                 result = ydl.extract_info(self.config.playlist_url, download=False)
                 return [e["id"] for e in result.get("entries", []) if e.get("id")]
         except Exception as e:
-            logger.error(f"Playlist synchronisation failed: {e}")
+            logger.error(f"Playlist scan failed: {e}")
             return []
 
     def _prepare_description(self, info: dict) -> str:
         """
-        Constructs the final description for Internet Archive.
-        Includes prefix template with date, uploader info, and original description.
+        Constructs the final description using the external template and YouTube metadata.
+        UK English: Handles placeholder substitution for the Internet Archive metadata field.
         """
-        # 1. Load and format prefix template
         template_path = (
             Path(os.getcwd()) / self.config.raw["ia_settings"]["description_template"]
         )
-        prefix = ""
+
+        # Extract metadata for placeholders
+        metadata_context = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "title": info.get("title", "N/A"),
+            "description": info.get("description", "No description available."),
+            "uploader": info.get("uploader", "Unknown Account"),
+            "likes": info.get("like_count", "N/A"),
+        }
+
         if template_path.exists():
-            template_text = template_path.read_text(encoding="utf-8")
-            # Replace placeholders like {date}
-            prefix = template_text.format(
-                date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                title=info.get("title", "Unknown"),
-            )
+            try:
+                template_text = template_path.read_text(encoding="utf-8")
+                # We use .format(**metadata_context) to map all dictionary keys to placeholders
+                return template_text.format(**metadata_context)
+            except KeyError as e:
+                logger.error(f"Missing placeholder in description_prefix.txt: {e}")
+                return metadata_context["description"]
 
-        # 2. Extract specific metadata for the body
-        uploader = info.get("uploader", "Unknown Account")
-        likes = info.get("like_count", "N/A")
-        orig_desc = info.get("description", "No description provided.")
-
-        # 3. Assemble the final standardised block
-        final_desc = (
-            f"{prefix}\n\n"
-            f"--- YouTube Metadata ---\n"
-            f"Uploaded by: {uploader}\n"
-            f"Likes at time of archival: {likes}\n\n"
-            f"--- Original Description ---\n"
-            f"{orig_desc}"
-        )
-        return final_desc
+        return metadata_context["description"]
 
     def process_video(
         self, video_id: str, dry_run: bool = False
     ) -> tuple[bool, dict | None]:
-        """
-        Returns (Success Boolean, Metadata Dict).
-        """
         work_dir = self.config.temp_work_dir / video_id
         video_url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -143,7 +127,7 @@ class ArchiveProcessor:
                 info = ydl.extract_info(video_url, download=True)
                 title = info.get("title", "Unknown Title")
 
-            # Rename info.json to Title.json
+            # Rename info.json to [Title].json
             info_json = work_dir / f"{title}.info.json"
             if info_json.exists():
                 shutil.move(str(info_json), str(work_dir / f"{title}.json"))

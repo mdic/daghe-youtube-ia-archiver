@@ -13,52 +13,48 @@ from .utils import get_dir_size_human
 
 def update_inventory(config, info: dict):
     """
-    Appends archival metadata to the TSV registry.
-    UK English spelling. Columns: YT ID, IA ID, Wayback URL, YT Title.
+    Appends metadata to the TSV registry including the Internet Archive URL.
+    UK English spelling.
     """
     if not config.inventory_enabled or not info:
         return
 
     file_path = config.inventory_file
     if not file_path:
-        logging.warning("Inventory enabled but inventory_tsv path is missing.")
         return
 
     file_exists = file_path.exists()
 
-    # Standardized headers for the registry
-    header = ["youtube_id", "ia_identifier", "wayback_url", "youtube_title"]
+    # Updated headers as per requirements
+    header = ["youtube_id", "ia_identifier", "wayback_url", "ia_url", "youtube_title"]
 
-    # Row mapping (wayback_url ready for Stage 2)
+    # Row mapping
+    video_id = info.get("id")
     row = {
-        "youtube_id": info.get("id"),
-        "ia_identifier": info.get("id"),  # Current strategy uses YT ID as IA ID
-        "wayback_url": "",
+        "youtube_id": video_id,
+        "ia_identifier": video_id,
+        "wayback_url": "",  # Ready for Stage 2
+        "ia_url": f"https://archive.org/details/{video_id}",
         "youtube_title": info.get("title", "Unknown Title"),
     }
 
     try:
-        # Ensure directory exists
         file_path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(file_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=header, delimiter="\t")
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
-        logging.info(f"Inventory updated: {info.get('id')}")
+        logging.info(f"Inventory TSV updated for: {video_id}")
     except Exception as e:
         logging.error(f"Failed to update inventory TSV: {e}")
 
 
 def run_job(config_path: str, dry_run: bool, verbose: bool):
-    """
-    Orchestrates the archival loop and updates the TSV registry.
-    UK English: Initialises logging and handles multi-target success reporting.
-    """
+    """Orchestrates the archival loop and aggregates results."""
     config = load_config(config_path)
 
-    # 1. Setup Logging
+    # Logging Setup
     log_level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger()
     logger.setLevel(log_level)
@@ -84,22 +80,20 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     processed = 0
     failed = []
 
-    # 2. Pipeline Execution
     ids = processor.get_playlist_video_ids()
     to_do = [i for i in ids if not archive.is_processed(i)]
 
-    logger.info(f"Processing started: {len(to_do)} new videos.")
+    logger.info(f"Processing {len(to_do)} new videos.")
 
     for vid in to_do:
         success, info = processor.process_video(vid, dry_run=dry_run)
         if success and not dry_run:
             archive.add(vid)
-            update_inventory(config, info)  # Update TSV after verified upload
+            update_inventory(config, info)
             processed += 1
         elif not success:
             failed.append(vid)
 
-    # 3. Finalise
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
@@ -111,7 +105,7 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
 
     summary = (
         f"Job: {config.get('job_name')}\n"
-        f"New Archived: {processed}\n"
+        f"Archived: {processed}\n"
         f"Failed: {len(failed)}\n"
         f"Status: {status.upper()}"
     )
