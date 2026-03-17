@@ -35,7 +35,7 @@ class ArchiveProcessor:
             "quiet": True,
             "no_warnings": True,
             "skip_download": False,
-            "writeinfojson": True,
+            "writeinfojson": False,
             "noplaylist": True,
             "extract_flat": False,
             "logger": YdlLogger(),
@@ -60,38 +60,37 @@ class ArchiveProcessor:
 
     def get_playlist_video_ids(self) -> list:
         """
-        UK English: Scans the YouTube playlist.
-        Saves metadata to data/playlist_<id>.json and prevents files in current/.
+        Scans the YouTube playlist.
+        Forces yt-dlp to use the data directory for any sidecar files.
         """
         scan_opts = self.ydl_opts.copy()
-        # CRITICAL: Disable automatic writeinfojson to prevent ghost files in current/
         scan_opts.update(
             {
                 "extract_flat": "in_playlist",
                 "skip_download": True,
                 "ignore_no_formats_error": True,
                 "writeinfojson": False,
+                # This forces yt-dlp to operate inside the data directory
+                "paths": {"home": str(self.config.data_dir)},
             }
         )
 
-        logger.info(f"Initialising playlist scan: {self.config.playlist_url}")
+        logger.info(f"Scanning playlist: {self.config.playlist_url}")
         try:
             with yt_dlp.YoutubeDL(scan_opts) as ydl:
                 result = ydl.extract_info(self.config.playlist_url, download=False)
-
                 playlist_id = result.get("id", "unknown")
-                # Save the playlist JSON to the data folder with ID-based naming
+
+                # Manual save of the metadata with the correct ID-based name
                 playlist_json_path = (
                     self.config.data_dir / f"playlist_{playlist_id}.json"
                 )
-
                 with open(playlist_json_path, "w", encoding="utf-8") as f:
                     json.dump(result, f, indent=4, ensure_ascii=False)
 
                 logger.info(
-                    f"Playlist metadata (ID: {playlist_id}) saved to: {playlist_json_path}"
+                    f"Playlist metadata (ID: {playlist_id}) saved to data directory."
                 )
-
                 return [e["id"] for e in result.get("entries", []) if e.get("id")]
         except Exception as e:
             logger.error(f"Playlist synchronisation failed: {e}")
@@ -147,20 +146,26 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 1. Download media and original assets
+            # 1. Download assets
             local_opts = self.ydl_opts.copy()
-            local_opts["outtmpl"] = f"{work_dir}/%(title)s.%(ext)s"
+            # Dynamic path injection: tell yt-dlp that this video's home is work_dir
+            local_opts.update(
+                {
+                    "paths": {"home": str(work_dir)},
+                    "outtmpl": {"default": "%(title)s.%(ext)s"},
+                }
+            )
 
             with yt_dlp.YoutubeDL(local_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 title = info.get("title", "Unknown Title")
 
-            # 2. Rename metadata JSON from info.json to [Title].json
-            info_json = work_dir / f"{title}.info.json"
-            if info_json.exists():
-                shutil.move(str(info_json), str(work_dir / f"{title}.json"))
+            # 2. Manual save of the metadata JSON directly in work_dir
+            final_json_path = work_dir / f"{title}.json"
+            with open(final_json_path, "w", encoding="utf-8") as f:
+                json.dump(info, f, indent=4, ensure_ascii=False)
 
-            # 3. Load IA Credentials from ia.env
+            # 3. Load IA Credentials
             ia_creds = {}
             if self.config.credentials_file.exists():
                 for line in self.config.credentials_file.read_text().splitlines():
@@ -168,7 +173,7 @@ class ArchiveProcessor:
                         k, v = line.strip().split("=", 1)
                         ia_creds[k] = v.strip('"').strip("'")
 
-            # 4. Upload to Internet Archive
+            # 4. Upload to IA
             logger.info(f"Uploading assets to Internet Archive: {video_id}")
             files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
 
@@ -200,6 +205,5 @@ class ArchiveProcessor:
             logger.error(f"Pipeline failure for {video_id}: {e}")
             return False, None
         finally:
-            # 5. Cleanup
             if work_dir.exists():
                 shutil.rmtree(work_dir)
