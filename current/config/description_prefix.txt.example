@@ -2,6 +2,7 @@
 
 <p>Archival Date: {date}</p>
 
----
-
-<p>Original Description: {description}</p>
+--- Original Description
+<p>
+{description}
+</p>
