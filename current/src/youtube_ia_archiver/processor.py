@@ -32,7 +32,6 @@ class ArchiveProcessor:
         """Initialise with authenticated session logic and UK English logging."""
         self.config = config
 
-        # Base settings
         self.ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -63,7 +62,7 @@ class ArchiveProcessor:
     def get_playlist_video_ids(self) -> list:
         """
         UK English: Scans the YouTube playlist.
-        Uses absolute paths in outtmpl to force files away from current/.
+        Utilises sanitize_info to handle LazyList objects during JSON serialisation.
         """
         playlist_url = self.config.playlist_url
         data_dir = self.config.data_dir.absolute()
@@ -75,27 +74,27 @@ class ArchiveProcessor:
                 "skip_download": True,
                 "ignore_no_formats_error": True,
                 "writeinfojson": False,
-                # FORCED ABSOLUTE REDIRECTION:
-                # We tell yt-dlp to use an absolute path for any generated infojson/metadata
                 "outtmpl": {"default": str(data_dir / "playlist_%(id)s.%(ext)s")},
                 "paths": {"home": str(data_dir)},
             }
         )
 
-        logger.info(f"Scanning playlist: {playlist_url}")
+        logger.info(f"Initialising playlist scan: {playlist_url}")
         try:
             with yt_dlp.YoutubeDL(scan_opts) as ydl:
-                # This returns the dict and SHOULD NOT write to current/ due to absolute outtmpl
                 result = ydl.extract_info(playlist_url, download=False)
-                playlist_id = result.get("id", "unknown")
 
-                # Manual save into data/ with the correct name
+                # CRITICAL FIX: Convert yt-dlp internal types (LazyList) to JSON-serialisable types
+                sanitized_result = ydl.sanitize_info(result)
+
+                playlist_id = result.get("id", "unknown")
                 playlist_json_path = data_dir / f"playlist_{playlist_id}.json"
+
                 with open(playlist_json_path, "w", encoding="utf-8") as f:
-                    json.dump(result, f, indent=4, ensure_ascii=False)
+                    json.dump(sanitized_result, f, indent=4, ensure_ascii=False)
 
                 logger.info(
-                    f"Playlist metadata (ID: {playlist_id}) successfully saved in data directory."
+                    f"Playlist metadata (ID: {playlist_id}) successfully registered in data directory."
                 )
                 return [e["id"] for e in result.get("entries", []) if e.get("id")]
         except Exception as e:
@@ -117,7 +116,6 @@ class ArchiveProcessor:
 
     def _prepare_description(self, info: dict) -> str:
         """Constructs the final description using the external template."""
-        # Use absolute path for the template
         template_path = (
             Path(os.getcwd()).absolute()
             / self.config.raw["ia_settings"]["description_template"]
@@ -155,7 +153,6 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # FORCE ABSOLUTE PATHS in Phase 2 too
             local_opts = self.ydl_opts.copy()
             local_opts.update(
                 {
@@ -169,10 +166,13 @@ class ArchiveProcessor:
                 info = ydl.extract_info(video_url, download=True)
                 title = info.get("title", "Unknown Title")
 
+                # Sanitize single video info for manual JSON saving
+                sanitized_info = ydl.sanitize_info(info)
+
             # Manual metadata save
             final_json_path = work_dir / f"{title}.json"
             with open(final_json_path, "w", encoding="utf-8") as f:
-                json.dump(info, f, indent=4, ensure_ascii=False)
+                json.dump(sanitized_info, f, indent=4, ensure_ascii=False)
 
             # IA Upload Logic
             ia_creds = {}
