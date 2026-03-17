@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,17 @@ import yt_dlp
 from internetarchive import get_item, upload
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def working_directory(path):
+    """UK English: Context manager to temporarily change the working directory."""
+    prev_cwd = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev_cwd)
 
 
 class YdlLogger:
@@ -31,6 +43,9 @@ class ArchiveProcessor:
     def __init__(self, config):
         """Initialise with authenticated session logic and UK English logging."""
         self.config = config
+        # Save the absolute path to the module root to avoid losing it during chdir
+        self.module_root = Path(os.getcwd()).absolute()
+
         self.ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -38,6 +53,7 @@ class ArchiveProcessor:
             "writeinfojson": False,
             "noplaylist": True,
             "extract_flat": False,
+            "cachedir": False,  # Disable cache to prevent .cache folders
             "logger": YdlLogger(),
         }
 
@@ -60,8 +76,8 @@ class ArchiveProcessor:
 
     def get_playlist_video_ids(self) -> list:
         """
-        Scans the YouTube playlist.
-        Forces yt-dlp to use the data directory for any sidecar files.
+        UK English: Scans the YouTube playlist.
+        Forces the process into the data directory to prevent ghost files in current/.
         """
         scan_opts = self.ydl_opts.copy()
         scan_opts.update(
@@ -70,31 +86,32 @@ class ArchiveProcessor:
                 "skip_download": True,
                 "ignore_no_formats_error": True,
                 "writeinfojson": False,
-                # This forces yt-dlp to operate inside the data directory
-                "paths": {"home": str(self.config.data_dir)},
             }
         )
 
         logger.info(f"Scanning playlist: {self.config.playlist_url}")
-        try:
-            with yt_dlp.YoutubeDL(scan_opts) as ydl:
-                result = ydl.extract_info(self.config.playlist_url, download=False)
-                playlist_id = result.get("id", "unknown")
 
-                # Manual save of the metadata with the correct ID-based name
-                playlist_json_path = (
-                    self.config.data_dir / f"playlist_{playlist_id}.json"
-                )
-                with open(playlist_json_path, "w", encoding="utf-8") as f:
-                    json.dump(result, f, indent=4, ensure_ascii=False)
+        # NUCLEAR OPTION: Temporarily move the entire process execution to the data folder
+        with working_directory(self.config.data_dir):
+            try:
+                with yt_dlp.YoutubeDL(scan_opts) as ydl:
+                    result = ydl.extract_info(self.config.playlist_url, download=False)
+                    playlist_id = result.get("id", "unknown")
 
-                logger.info(
-                    f"Playlist metadata (ID: {playlist_id}) saved to data directory."
-                )
-                return [e["id"] for e in result.get("entries", []) if e.get("id")]
-        except Exception as e:
-            logger.error(f"Playlist synchronisation failed: {e}")
-            return []
+                    # Manual save of metadata JSON with the correct ID-based name
+                    playlist_json_path = (
+                        self.config.data_dir / f"playlist_{playlist_id}.json"
+                    )
+                    with open(playlist_json_path, "w", encoding="utf-8") as f:
+                        json.dump(result, f, indent=4, ensure_ascii=False)
+
+                    logger.info(
+                        f"Playlist metadata (ID: {playlist_id}) saved to data directory."
+                    )
+                    return [e["id"] for e in result.get("entries", []) if e.get("id")]
+            except Exception as e:
+                logger.error(f"Playlist synchronisation failed: {e}")
+                return []
 
     def _wait_for_ia_availability(self, identifier: str):
         """Polls Internet Archive to ensure the item is indexed after upload."""
@@ -111,9 +128,11 @@ class ArchiveProcessor:
 
     def _prepare_description(self, info: dict) -> str:
         """Constructs the final description using the external template."""
+        # Use absolute module_root to find the template regardless of current CWD
         template_path = (
-            Path(os.getcwd()) / self.config.raw["ia_settings"]["description_template"]
+            self.module_root / self.config.raw["ia_settings"]["description_template"]
         )
+
         metadata_context = {
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "title": info.get("title", "N/A"),
@@ -146,24 +165,19 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 1. Download assets
-            local_opts = self.ydl_opts.copy()
-            # Dynamic path injection: tell yt-dlp that this video's home is work_dir
-            local_opts.update(
-                {
-                    "paths": {"home": str(work_dir)},
-                    "outtmpl": {"default": "%(title)s.%(ext)s"},
-                }
-            )
+            # 1. Download assets while inside the work_dir
+            with working_directory(work_dir):
+                local_opts = self.ydl_opts.copy()
+                local_opts["outtmpl"] = "%(title)s.%(ext)s"
 
-            with yt_dlp.YoutubeDL(local_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-                title = info.get("title", "Unknown Title")
+                with yt_dlp.YoutubeDL(local_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=True)
+                    title = info.get("title", "Unknown Title")
 
-            # 2. Manual save of the metadata JSON directly in work_dir
-            final_json_path = work_dir / f"{title}.json"
-            with open(final_json_path, "w", encoding="utf-8") as f:
-                json.dump(info, f, indent=4, ensure_ascii=False)
+                # 2. Manual save of the metadata JSON directly in work_dir
+                final_json_path = Path(f"{title}.json")
+                with open(final_json_path, "w", encoding="utf-8") as f:
+                    json.dump(info, f, indent=4, ensure_ascii=False)
 
             # 3. Load IA Credentials
             ia_creds = {}
