@@ -7,7 +7,8 @@ dependencies = [
     "yt-dlp>=2026.3.13",
     "yt-dlp-ejs",
     "pyyaml>=6.0.1",
-    "internetarchive>=5.4.2"
+    "internetarchive>=5.4.2",
+    "waybackpy>=3.0.6",
 ]
 
 [tool.uv]

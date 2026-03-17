@@ -10,6 +10,11 @@ ia_settings:
   # Prefix template for the Internet Archive description
   description_template: "config/description_prefix.txt"
 
+# Wayback Machine Configuration
+wayback:
+  enabled: true
+  user_agent: "DaGhE Automation Bot (Digital Preservation effort)"
+
 # Professional Throttling Configuration
 timeouts:
   ia_upload:
