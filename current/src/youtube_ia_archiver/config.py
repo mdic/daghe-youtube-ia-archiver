@@ -60,6 +60,14 @@ class JobConfig:
     def inventory_enabled(self) -> bool:
         return self.raw.get("inventory", {}).get("enabled", False)
 
+    @property
+    def timeouts(self) -> dict:
+        """UK English: Returns the throttling and timeout settings."""
+        return self.raw.get("timeouts", {})
+
+    def get_timeout_setting(self, platform: str, key: str, default: int) -> int:
+        return self.timeouts.get(platform, {}).get(key, default)
+
     def get(self, *keys, default=None):
         data = self.raw
         for key in keys:

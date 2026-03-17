@@ -10,6 +10,17 @@ ia_settings:
   # Prefix template for the Internet Archive description
   description_template: "config/description_prefix.txt"
 
+# Professional Throttling Configuration
+timeouts:
+  ia_upload:
+    timeout_seconds: 600    # 10 min per request
+    polling_seconds: 45     # Wait between checks
+    max_wait_seconds: 900   # 15 min max per item
+  wayback:
+    timeout_seconds: 60     # 1 min per request
+    polling_seconds: 20     # Wait between retries
+    max_wait_seconds: 450   # 7.5 min max per URL
+
 # Control toggle for the registry logic
 inventory:
   enabled: true
@@ -28,6 +39,7 @@ yt_dlp:
     js_runtime: "deno"
     # Prefer non-AI-upscaled videos, as of today identified with format_id containing "-sr"
     format: "bestvideo[format_id!*=sr]+bestaudio/best[format_id!*=sr]"
+    merge_output_format: "mp4"
     subtitleslangs:
         - "en.*"
         - "it.*"

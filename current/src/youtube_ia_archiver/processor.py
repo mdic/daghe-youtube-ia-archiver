@@ -2,11 +2,12 @@ import json
 import logging
 import os
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
-from internetarchive import upload
+from internetarchive import get_item, upload
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ class YdlLogger:
 
 class ArchiveProcessor:
     def __init__(self, config):
-        """Initialise with robust session options and UK English logging."""
         self.config = config
         self.ydl_opts = {
             "quiet": True,
@@ -58,51 +58,27 @@ class ArchiveProcessor:
                     v = False
             self.ydl_opts[k] = v
 
-    def get_playlist_video_ids(self) -> list:
-        scan_opts = self.ydl_opts.copy()
-        scan_opts.update(
-            {
-                "extract_flat": "in_playlist",
-                "skip_download": True,
-                "ignore_no_formats_error": True,
-            }
-        )
-        try:
-            with yt_dlp.YoutubeDL(scan_opts) as ydl:
-                result = ydl.extract_info(self.config.playlist_url, download=False)
-                return [e["id"] for e in result.get("entries", []) if e.get("id")]
-        except Exception as e:
-            logger.error(f"Playlist scan failed: {e}")
-            return []
-
-    def _prepare_description(self, info: dict) -> str:
+    def _wait_for_ia_availability(self, identifier: str):
         """
-        Constructs the final description using the external template and YouTube metadata.
-        UK English: Handles placeholder substitution for the Internet Archive metadata field.
+        Polls Internet Archive to ensure the item is indexed before proceeding.
+        UK English: Implements the requested polling and max wait logic.
         """
-        template_path = (
-            Path(os.getcwd()) / self.config.raw["ia_settings"]["description_template"]
-        )
+        max_wait = self.config.get_timeout_setting("ia_upload", "max_wait_seconds", 900)
+        polling = self.config.get_timeout_setting("ia_upload", "polling_seconds", 45)
 
-        # Extract metadata for placeholders
-        metadata_context = {
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "title": info.get("title", "N/A"),
-            "description": info.get("description", "No description available."),
-            "uploader": info.get("uploader", "Unknown Account"),
-            "likes": info.get("like_count", "N/A"),
-        }
+        start_time = time.time()
+        logger.info(f"Initialising availability check for IA item: {identifier}")
 
-        if template_path.exists():
-            try:
-                template_text = template_path.read_text(encoding="utf-8")
-                # We use .format(**metadata_context) to map all dictionary keys to placeholders
-                return template_text.format(**metadata_context)
-            except KeyError as e:
-                logger.error(f"Missing placeholder in description_prefix.txt: {e}")
-                return metadata_context["description"]
+        while (time.time() - start_time) < max_wait:
+            item = get_item(identifier)
+            if item.exists:
+                logger.info(f"IA Item {identifier} is now live and reachable.")
+                return True
+            logger.debug(f"Item {identifier} not yet indexed. Waiting {polling}s...")
+            time.sleep(polling)
 
-        return metadata_context["description"]
+        logger.warning(f"Reached max wait time for IA item {identifier}. Moving on.")
+        return False
 
     def process_video(
         self, video_id: str, dry_run: bool = False
@@ -119,20 +95,21 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
+            # 1. Download media (Forced to MP4 for standardisation)
             local_opts = self.ydl_opts.copy()
             local_opts["outtmpl"] = f"{work_dir}/%(title)s.%(ext)s"
 
-            logger.info(f"Initiating archival for {video_id}...")
+            logger.info(f"Starting archival for {video_id}...")
             with yt_dlp.YoutubeDL(local_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 title = info.get("title", "Unknown Title")
 
-            # Rename info.json to [Title].json
+            # 2. Rename metadata JSON
             info_json = work_dir / f"{title}.info.json"
             if info_json.exists():
                 shutil.move(str(info_json), str(work_dir / f"{title}.json"))
 
-            # Load IA Credentials
+            # 3. Load IA Credentials
             ia_creds = {}
             if self.config.credentials_file.exists():
                 for line in self.config.credentials_file.read_text().splitlines():
@@ -140,7 +117,7 @@ class ArchiveProcessor:
                         k, v = line.strip().split("=", 1)
                         ia_creds[k] = v.strip('"').strip("'")
 
-            # Upload to IA
+            # 4. Upload to IA
             logger.info(f"Uploading assets to Internet Archive: {video_id}")
             files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
 
@@ -163,7 +140,8 @@ class ArchiveProcessor:
             )
 
             if all(r.status_code == 200 for r in responses):
-                logger.info(f"Archival successful for {video_id}")
+                # SUCCESS: Now we poll to ensure IA has processed the ingest
+                self._wait_for_ia_availability(video_id)
                 return True, info
 
             return False, None
@@ -174,3 +152,41 @@ class ArchiveProcessor:
         finally:
             if work_dir.exists():
                 shutil.rmtree(work_dir)
+
+    def _prepare_description(self, info: dict) -> str:
+        """Constructs the final description using the external template."""
+        template_path = (
+            Path(os.getcwd()) / self.config.raw["ia_settings"]["description_template"]
+        )
+        metadata_context = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "title": info.get("title", "N/A"),
+            "description": info.get("description", "No description available."),
+            "uploader": info.get("uploader", "Unknown Account"),
+            "likes": info.get("like_count", "N/A"),
+        }
+        if template_path.exists():
+            try:
+                return template_path.read_text(encoding="utf-8").format(
+                    **metadata_context
+                )
+            except Exception as e:
+                logger.error(f"Placeholder error: {e}")
+        return metadata_context["description"]
+
+    def get_playlist_video_ids(self) -> list:
+        # (Same as before, ensures flat scan for playlist discovery)
+        scan_opts = self.ydl_opts.copy()
+        scan_opts.update(
+            {
+                "extract_flat": "in_playlist",
+                "skip_download": True,
+                "ignore_no_formats_error": True,
+            }
+        )
+        try:
+            with yt_dlp.YoutubeDL(scan_opts) as ydl:
+                result = ydl.extract_info(self.config.playlist_url, download=False)
+                return [e["id"] for e in result.get("entries", []) if e.get("id")]
+        except Exception:
+            return []
