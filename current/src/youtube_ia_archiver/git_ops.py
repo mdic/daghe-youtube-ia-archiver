@@ -37,7 +37,7 @@ def run_git_sync(config, new_count: int):
             return True, "No actual changes detected in data directory"
 
         # 2. Stage changes
-        subprocess.run(["git", "add", "."], cwd=data_dir, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=data_dir, check=True)
 
         # 3. Create commit
         # Use env to ensure the identity is picked up if not set globally
