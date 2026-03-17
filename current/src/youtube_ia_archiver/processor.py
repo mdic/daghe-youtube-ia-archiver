@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 class YdlLogger:
     def debug(self, msg):
-        if msg.startswith("[debug] "):
-            pass
-        else:
+        if not msg.startswith("[debug] "):
             logger.debug(msg)
 
     def info(self, msg):
@@ -31,6 +29,7 @@ class YdlLogger:
 
 class ArchiveProcessor:
     def __init__(self, config):
+        """Initialise with authenticated session logic and UK English logging."""
         self.config = config
         self.ydl_opts = {
             "quiet": True,
@@ -41,6 +40,7 @@ class ArchiveProcessor:
             "extract_flat": False,
             "logger": YdlLogger(),
         }
+
         global_extras = self.config.global_ydl_opts
         if global_extras:
             self._apply_extra_opts(global_extras)
@@ -58,100 +58,57 @@ class ArchiveProcessor:
                     v = False
             self.ydl_opts[k] = v
 
+    def get_playlist_video_ids(self) -> list:
+        """
+        UK English: Scans the YouTube playlist.
+        Saves metadata to data/playlist_<id>.json and prevents files in current/.
+        """
+        scan_opts = self.ydl_opts.copy()
+        # CRITICAL: Disable automatic writeinfojson to prevent ghost files in current/
+        scan_opts.update(
+            {
+                "extract_flat": "in_playlist",
+                "skip_download": True,
+                "ignore_no_formats_error": True,
+                "writeinfojson": False,
+            }
+        )
+
+        logger.info(f"Initialising playlist scan: {self.config.playlist_url}")
+        try:
+            with yt_dlp.YoutubeDL(scan_opts) as ydl:
+                result = ydl.extract_info(self.config.playlist_url, download=False)
+
+                playlist_id = result.get("id", "unknown")
+                # Save the playlist JSON to the data folder with ID-based naming
+                playlist_json_path = (
+                    self.config.data_dir / f"playlist_{playlist_id}.json"
+                )
+
+                with open(playlist_json_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, indent=4, ensure_ascii=False)
+
+                logger.info(
+                    f"Playlist metadata (ID: {playlist_id}) saved to: {playlist_json_path}"
+                )
+
+                return [e["id"] for e in result.get("entries", []) if e.get("id")]
+        except Exception as e:
+            logger.error(f"Playlist synchronisation failed: {e}")
+            return []
+
     def _wait_for_ia_availability(self, identifier: str):
-        """
-        Polls Internet Archive to ensure the item is indexed before proceeding.
-        UK English: Implements the requested polling and max wait logic.
-        """
+        """Polls Internet Archive to ensure the item is indexed after upload."""
         max_wait = self.config.get_timeout_setting("ia_upload", "max_wait_seconds", 900)
         polling = self.config.get_timeout_setting("ia_upload", "polling_seconds", 45)
-
         start_time = time.time()
-        logger.info(f"Initialising availability check for IA item: {identifier}")
 
         while (time.time() - start_time) < max_wait:
-            item = get_item(identifier)
-            if item.exists:
-                logger.info(f"IA Item {identifier} is now live and reachable.")
+            if get_item(identifier).exists:
+                logger.info(f"IA Item {identifier} is indexed and live.")
                 return True
-            logger.debug(f"Item {identifier} not yet indexed. Waiting {polling}s...")
             time.sleep(polling)
-
-        logger.warning(f"Reached max wait time for IA item {identifier}. Moving on.")
         return False
-
-    def process_video(
-        self, video_id: str, dry_run: bool = False
-    ) -> tuple[bool, dict | None]:
-        work_dir = self.config.temp_work_dir / video_id
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-        if dry_run:
-            logger.info(f"[Dry-run] Archival simulation for: {video_id}")
-            return True, None
-
-        if work_dir.exists():
-            shutil.rmtree(work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            # 1. Download media (Forced to MP4 for standardisation)
-            local_opts = self.ydl_opts.copy()
-            local_opts["outtmpl"] = f"{work_dir}/%(title)s.%(ext)s"
-
-            logger.info(f"Starting archival for {video_id}...")
-            with yt_dlp.YoutubeDL(local_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-                title = info.get("title", "Unknown Title")
-
-            # 2. Rename metadata JSON
-            info_json = work_dir / f"{title}.info.json"
-            if info_json.exists():
-                shutil.move(str(info_json), str(work_dir / f"{title}.json"))
-
-            # 3. Load IA Credentials
-            ia_creds = {}
-            if self.config.credentials_file.exists():
-                for line in self.config.credentials_file.read_text().splitlines():
-                    if "=" in line and not line.startswith("#"):
-                        k, v = line.strip().split("=", 1)
-                        ia_creds[k] = v.strip('"').strip("'")
-
-            # 4. Upload to IA
-            logger.info(f"Uploading assets to Internet Archive: {video_id}")
-            files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
-
-            ia_metadata = {
-                "title": title,
-                "description": self._prepare_description(info),
-                "mediatype": "movies",
-                "collection": self.config.get("ia_settings", "collection"),
-                "external-identifier": f"youtube:{video_id}",
-                "originalurl": video_url,
-                "creator": info.get("uploader", "Unknown"),
-            }
-
-            responses = upload(
-                identifier=video_id,
-                files=files_to_upload,
-                metadata=ia_metadata,
-                access_key=ia_creds.get("IA_ACCESS_KEY"),
-                secret_key=ia_creds.get("IA_SECRET_KEY"),
-            )
-
-            if all(r.status_code == 200 for r in responses):
-                # SUCCESS: Now we poll to ensure IA has processed the ingest
-                self._wait_for_ia_availability(video_id)
-                return True, info
-
-            return False, None
-
-        except Exception as e:
-            logger.error(f"Archival failed for {video_id}: {str(e)}")
-            return False, None
-        finally:
-            if work_dir.exists():
-                shutil.rmtree(work_dir)
 
     def _prepare_description(self, info: dict) -> str:
         """Constructs the final description using the external template."""
@@ -171,36 +128,78 @@ class ArchiveProcessor:
                     **metadata_context
                 )
             except Exception as e:
-                logger.error(f"Placeholder error: {e}")
+                logger.error(f"Placeholder substitution error: {e}")
         return metadata_context["description"]
 
-    def get_playlist_video_ids(self) -> list:
-        """
-        Scans the YouTube playlist and saves the metadata JSON to the data directory.
-        """
-        scan_opts = self.ydl_opts.copy()
-        scan_opts.update(
-            {
-                "extract_flat": "in_playlist",
-                "skip_download": True,
-                "ignore_no_formats_error": True,
-            }
-        )
+    def process_video(
+        self, video_id: str, dry_run: bool = False
+    ) -> tuple[bool, dict | None]:
+        """Executes the archival pipeline for a single video."""
+        work_dir = self.config.temp_work_dir / video_id
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
 
-        logger.info(f"Scanning playlist: {self.config.playlist_url}")
+        if dry_run:
+            logger.info(f"[Dry-run] Archival simulation for: {video_id}")
+            return True, None
+
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            with yt_dlp.YoutubeDL(scan_opts) as ydl:
-                result = ydl.extract_info(self.config.playlist_url, download=False)
+            # 1. Download media and original assets
+            local_opts = self.ydl_opts.copy()
+            local_opts["outtmpl"] = f"{work_dir}/%(title)s.%(ext)s"
 
-                # Path resolution for the playlist JSON (moving it to data/)
-                playlist_json_path = self.config.data_dir / "playlist_metadata.json"
-                with open(playlist_json_path, "w", encoding="utf-8") as f:
-                    json.dump(result, f, indent=4, ensure_ascii=False)
-                logger.info(
-                    f"Playlist metadata standardisation complete: {playlist_json_path}"
-                )
+            with yt_dlp.YoutubeDL(local_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                title = info.get("title", "Unknown Title")
 
-                return [e["id"] for e in result.get("entries", []) if e.get("id")]
+            # 2. Rename metadata JSON from info.json to [Title].json
+            info_json = work_dir / f"{title}.info.json"
+            if info_json.exists():
+                shutil.move(str(info_json), str(work_dir / f"{title}.json"))
+
+            # 3. Load IA Credentials from ia.env
+            ia_creds = {}
+            if self.config.credentials_file.exists():
+                for line in self.config.credentials_file.read_text().splitlines():
+                    if "=" in line:
+                        k, v = line.strip().split("=", 1)
+                        ia_creds[k] = v.strip('"').strip("'")
+
+            # 4. Upload to Internet Archive
+            logger.info(f"Uploading assets to Internet Archive: {video_id}")
+            files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
+
+            ia_metadata = {
+                "title": title,
+                "description": self._prepare_description(info),
+                "mediatype": "movies",
+                "collection": self.config.get("ia_settings", "collection"),
+                "external-identifier": f"youtube:{video_id}",
+                "originalurl": f"https://www.youtube.com/watch?v={video_id}",
+                "creator": info.get("uploader", "Unknown"),
+            }
+
+            responses = upload(
+                identifier=video_id,
+                files=files_to_upload,
+                metadata=ia_metadata,
+                access_key=ia_creds.get("IA_ACCESS_KEY"),
+                secret_key=ia_creds.get("IA_SECRET_KEY"),
+            )
+
+            if all(r.status_code == 200 for r in responses):
+                self._wait_for_ia_availability(video_id)
+                return True, info
+
+            return False, None
+
         except Exception as e:
-            logger.error(f"Playlist synchronisation failed: {e}")
-            return []
+            logger.error(f"Pipeline failure for {video_id}: {e}")
+            return False, None
+        finally:
+            # 5. Cleanup
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
