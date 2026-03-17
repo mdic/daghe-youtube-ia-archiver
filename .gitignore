@@ -7,6 +7,8 @@ __pycache__/
 # Data Confinement
 # Ignore everything in data/ except the .gitkeep file
 data/*
+../data/
+../data/*
 !data/.gitkeep
 
 # Config Safety
