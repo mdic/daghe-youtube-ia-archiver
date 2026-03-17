@@ -49,6 +49,10 @@ yt_dlp:
     sleep_interval_requests: 2
     check_formats: true
 
+runtime:
+  # If one video fails, continue with the rest of the playlist
+  continue_on_video_error: true
+
 inventory:
   enabled: true
   file: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_inventory.tsv"

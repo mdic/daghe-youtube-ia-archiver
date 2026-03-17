@@ -3,7 +3,6 @@ import logging
 import os
 import shutil
 import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -11,17 +10,6 @@ import yt_dlp
 from internetarchive import get_item, upload
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def working_directory(path):
-    """UK English: Context manager to temporarily change the working directory."""
-    prev_cwd = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(prev_cwd)
 
 
 class YdlLogger:
@@ -43,9 +31,8 @@ class ArchiveProcessor:
     def __init__(self, config):
         """Initialise with authenticated session logic and UK English logging."""
         self.config = config
-        # Save the absolute path to the module root to avoid losing it during chdir
-        self.module_root = Path(os.getcwd()).absolute()
 
+        # Base settings
         self.ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -53,7 +40,6 @@ class ArchiveProcessor:
             "writeinfojson": False,
             "noplaylist": True,
             "extract_flat": False,
-            "cachedir": False,  # Disable cache to prevent .cache folders
             "logger": YdlLogger(),
         }
 
@@ -77,8 +63,11 @@ class ArchiveProcessor:
     def get_playlist_video_ids(self) -> list:
         """
         UK English: Scans the YouTube playlist.
-        Forces the process into the data directory to prevent ghost files in current/.
+        Uses absolute paths in outtmpl to force files away from current/.
         """
+        playlist_url = self.config.playlist_url
+        data_dir = self.config.data_dir.absolute()
+
         scan_opts = self.ydl_opts.copy()
         scan_opts.update(
             {
@@ -86,32 +75,32 @@ class ArchiveProcessor:
                 "skip_download": True,
                 "ignore_no_formats_error": True,
                 "writeinfojson": False,
+                # FORCED ABSOLUTE REDIRECTION:
+                # We tell yt-dlp to use an absolute path for any generated infojson/metadata
+                "outtmpl": {"default": str(data_dir / "playlist_%(id)s.%(ext)s")},
+                "paths": {"home": str(data_dir)},
             }
         )
 
-        logger.info(f"Scanning playlist: {self.config.playlist_url}")
+        logger.info(f"Scanning playlist: {playlist_url}")
+        try:
+            with yt_dlp.YoutubeDL(scan_opts) as ydl:
+                # This returns the dict and SHOULD NOT write to current/ due to absolute outtmpl
+                result = ydl.extract_info(playlist_url, download=False)
+                playlist_id = result.get("id", "unknown")
 
-        # NUCLEAR OPTION: Temporarily move the entire process execution to the data folder
-        with working_directory(self.config.data_dir):
-            try:
-                with yt_dlp.YoutubeDL(scan_opts) as ydl:
-                    result = ydl.extract_info(self.config.playlist_url, download=False)
-                    playlist_id = result.get("id", "unknown")
+                # Manual save into data/ with the correct name
+                playlist_json_path = data_dir / f"playlist_{playlist_id}.json"
+                with open(playlist_json_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, indent=4, ensure_ascii=False)
 
-                    # Manual save of metadata JSON with the correct ID-based name
-                    playlist_json_path = (
-                        self.config.data_dir / f"playlist_{playlist_id}.json"
-                    )
-                    with open(playlist_json_path, "w", encoding="utf-8") as f:
-                        json.dump(result, f, indent=4, ensure_ascii=False)
-
-                    logger.info(
-                        f"Playlist metadata (ID: {playlist_id}) saved to data directory."
-                    )
-                    return [e["id"] for e in result.get("entries", []) if e.get("id")]
-            except Exception as e:
-                logger.error(f"Playlist synchronisation failed: {e}")
-                return []
+                logger.info(
+                    f"Playlist metadata (ID: {playlist_id}) successfully saved in data directory."
+                )
+                return [e["id"] for e in result.get("entries", []) if e.get("id")]
+        except Exception as e:
+            logger.error(f"Playlist synchronisation failed: {e}")
+            return []
 
     def _wait_for_ia_availability(self, identifier: str):
         """Polls Internet Archive to ensure the item is indexed after upload."""
@@ -128,9 +117,10 @@ class ArchiveProcessor:
 
     def _prepare_description(self, info: dict) -> str:
         """Constructs the final description using the external template."""
-        # Use absolute module_root to find the template regardless of current CWD
+        # Use absolute path for the template
         template_path = (
-            self.module_root / self.config.raw["ia_settings"]["description_template"]
+            Path(os.getcwd()).absolute()
+            / self.config.raw["ia_settings"]["description_template"]
         )
 
         metadata_context = {
@@ -146,14 +136,14 @@ class ArchiveProcessor:
                     **metadata_context
                 )
             except Exception as e:
-                logger.error(f"Placeholder substitution error: {e}")
+                logger.error(f"Template formatting error: {e}")
         return metadata_context["description"]
 
     def process_video(
         self, video_id: str, dry_run: bool = False
     ) -> tuple[bool, dict | None]:
-        """Executes the archival pipeline for a single video."""
-        work_dir = self.config.temp_work_dir / video_id
+        """Executes the archival pipeline for a single video using absolute path logic."""
+        work_dir = self.config.temp_work_dir.absolute() / video_id
         video_url = f"https://www.youtube.com/watch?v={video_id}"
 
         if dry_run:
@@ -165,29 +155,34 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 1. Download assets while inside the work_dir
-            with working_directory(work_dir):
-                local_opts = self.ydl_opts.copy()
-                local_opts["outtmpl"] = "%(title)s.%(ext)s"
+            # FORCE ABSOLUTE PATHS in Phase 2 too
+            local_opts = self.ydl_opts.copy()
+            local_opts.update(
+                {
+                    "outtmpl": {"default": str(work_dir / "%(title)s.%(ext)s")},
+                    "paths": {"home": str(work_dir)},
+                    "writeinfojson": False,
+                }
+            )
 
-                with yt_dlp.YoutubeDL(local_opts) as ydl:
-                    info = ydl.extract_info(video_url, download=True)
-                    title = info.get("title", "Unknown Title")
+            with yt_dlp.YoutubeDL(local_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                title = info.get("title", "Unknown Title")
 
-                # 2. Manual save of the metadata JSON directly in work_dir
-                final_json_path = Path(f"{title}.json")
-                with open(final_json_path, "w", encoding="utf-8") as f:
-                    json.dump(info, f, indent=4, ensure_ascii=False)
+            # Manual metadata save
+            final_json_path = work_dir / f"{title}.json"
+            with open(final_json_path, "w", encoding="utf-8") as f:
+                json.dump(info, f, indent=4, ensure_ascii=False)
 
-            # 3. Load IA Credentials
+            # IA Upload Logic
             ia_creds = {}
-            if self.config.credentials_file.exists():
-                for line in self.config.credentials_file.read_text().splitlines():
+            creds_file = self.config.credentials_file.absolute()
+            if creds_file.exists():
+                for line in creds_file.read_text().splitlines():
                     if "=" in line:
                         k, v = line.strip().split("=", 1)
                         ia_creds[k] = v.strip('"').strip("'")
 
-            # 4. Upload to IA
             logger.info(f"Uploading assets to Internet Archive: {video_id}")
             files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
 
