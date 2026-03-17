@@ -1,8 +1,19 @@
 import logging
 import os
+import re
 import subprocess
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+def sanitize_filename(filename: str) -> str:
+    if not filename:
+        return "unknown_title"
+    # Forza a stringa, rimuove caratteri illegali
+    filename = str(filename)
+    filename = re.sub(r"(?u)[^-\w. ]", "", filename)
+    filename = " ".join(filename.split())
+    return filename[:200] if filename else "unknown_title"
 
 
 def setup_logging(config, verbose: bool):
