@@ -10,10 +10,8 @@ from .notifier import send_notification
 from .processor import ArchiveProcessor
 
 
-def update_inventory(config, info: dict):
-    """
-    UK English: Updates the TSV registry using the normalised IA identifier.
-    """
+def update_inventory(config, info: dict, wayback_url: str):
+    """UK English: Records metadata and archival URLs to the TSV registry."""
     if not config.inventory_enabled or not info:
         return
 
@@ -22,15 +20,15 @@ def update_inventory(config, info: dict):
         return
 
     file_exists = file_path.exists()
-    header = ["youtube_id", "ia_identifier", "ia_url", "youtube_title"]
+    header = ["youtube_id", "ia_identifier", "wayback_url", "ia_url", "youtube_title"]
 
-    # We retrieve the sanitised ID injected in processor.py
     video_id = info.get("id")
     ia_id = info.get("ia_identifier", f"yt-{video_id}")
 
     row = {
         "youtube_id": video_id,
         "ia_identifier": ia_id,
+        "wayback_url": wayback_url,
         "ia_url": f"https://archive.org/details/{ia_id}",
         "youtube_title": info.get("title", "Unknown Title"),
     }
@@ -42,7 +40,7 @@ def update_inventory(config, info: dict):
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
-        logging.info(f"Inventory TSV synchronised for: {ia_id}")
+        logging.info(f"Inventory synchronised: {video_id}")
     except Exception as e:
         logger.error(f"TSV update failed: {e}")
 
@@ -50,6 +48,7 @@ def update_inventory(config, info: dict):
 def run_job(config_path: str, dry_run: bool, verbose: bool):
     config = load_config(config_path)
 
+    # Standardised Logging
     log_level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger()
     logger.setLevel(log_level)
@@ -67,8 +66,8 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
         fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=3)
         fh.setFormatter(formatter)
         logger.addHandler(fh)
-    except Exception as e:
-        print(f"Log error: {e}")
+    except Exception:
+        pass
 
     archive = ArchiveManager(config.archive_file)
     processor = ArchiveProcessor(config)
@@ -76,20 +75,23 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     processed = 0
     failed = []
 
+    # 1. Discover playlist
     ids = processor.get_playlist_video_ids()
     to_do = [i for i in ids if not archive.is_processed(i)]
 
-    logger.info(f"Archival batch initiated: {len(to_do)} new items.")
+    logger.info(f"Archival sequence initiated: {len(to_do)} new items.")
 
     for vid in to_do:
-        success, info = processor.process_video(vid, dry_run=dry_run)
+        # Expected return: (Success, Info, WaybackURL)
+        success, info, wb_url = processor.process_video(vid, dry_run=dry_run)
         if success and not dry_run:
             archive.add(vid)
-            update_inventory(config, info)
+            update_inventory(config, info, wb_url)
             processed += 1
         elif not success:
             failed.append(vid)
 
+    # 3. Git Sync
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
@@ -99,7 +101,7 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
         else ("partial" if processed > 0 else "failure")
     )
 
-    summary = f"Job: {config.get('job_name')}\nArchived: {processed}\nStatus: {status.upper()}"
+    summary = f"Job: {config.get('job_name')}\nArchived: {processed}\nGit: {git_msg}\nStatus: {status.upper()}"
     if not dry_run:
         send_notification(
             config,
