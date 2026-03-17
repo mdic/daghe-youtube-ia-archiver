@@ -1,3 +1,4 @@
+import csv
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -10,10 +11,50 @@ from .processor import ArchiveProcessor
 from .utils import get_dir_size_human
 
 
+def update_inventory(config, info: dict):
+    """
+    Appends archival metadata to the TSV registry.
+    UK English spelling. Columns: YT ID, IA ID, Wayback URL, YT Title.
+    """
+    if not config.inventory_enabled or not info:
+        return
+
+    file_path = config.inventory_file
+    if not file_path:
+        logging.warning("Inventory enabled but inventory_tsv path is missing.")
+        return
+
+    file_exists = file_path.exists()
+
+    # Standardized headers for the registry
+    header = ["youtube_id", "ia_identifier", "wayback_url", "youtube_title"]
+
+    # Row mapping (wayback_url ready for Stage 2)
+    row = {
+        "youtube_id": info.get("id"),
+        "ia_identifier": info.get("id"),  # Current strategy uses YT ID as IA ID
+        "wayback_url": "",
+        "youtube_title": info.get("title", "Unknown Title"),
+    }
+
+    try:
+        # Ensure directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(file_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=header, delimiter="\t")
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        logging.info(f"Inventory updated: {info.get('id')}")
+    except Exception as e:
+        logging.error(f"Failed to update inventory TSV: {e}")
+
+
 def run_job(config_path: str, dry_run: bool, verbose: bool):
     """
-    Orchestrates the archival loop.
-    UK English: Initialises logging and aggregates results for reporting.
+    Orchestrates the archival loop and updates the TSV registry.
+    UK English: Initialises logging and handles multi-target success reporting.
     """
     config = load_config(config_path)
 
@@ -47,17 +88,18 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     ids = processor.get_playlist_video_ids()
     to_do = [i for i in ids if not archive.is_processed(i)]
 
-    logger.info(f"Processing cycle started. {len(to_do)} new videos detected.")
+    logger.info(f"Processing started: {len(to_do)} new videos.")
 
     for vid in to_do:
-        if processor.process_video(vid, dry_run=dry_run):
-            if not dry_run:
-                archive.add(vid)
+        success, info = processor.process_video(vid, dry_run=dry_run)
+        if success and not dry_run:
+            archive.add(vid)
+            update_inventory(config, info)  # Update TSV after verified upload
             processed += 1
-        else:
+        elif not success:
             failed.append(vid)
 
-    # 3. Synchronisation & Final Report
+    # 3. Finalise
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
@@ -69,10 +111,8 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
 
     summary = (
         f"Job: {config.get('job_name')}\n"
-        f"Videos Scanned: {len(ids)}\n"
         f"New Archived: {processed}\n"
         f"Failed: {len(failed)}\n"
-        f"Git Sync: {git_msg}\n"
         f"Status: {status.upper()}"
     )
 

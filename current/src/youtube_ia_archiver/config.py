@@ -28,6 +28,11 @@ class JobConfig:
         return self._expand_path(self.raw.get("paths", {}).get("archive_file"))
 
     @property
+    def inventory_file(self) -> Path:
+        """UK English: Resolves the TSV registry path from the paths section."""
+        return self._expand_path(self.raw.get("paths", {}).get("inventory_tsv"))
+
+    @property
     def temp_work_dir(self) -> Path:
         return self._expand_path(self.raw.get("paths", {}).get("temp_work_dir"))
 
@@ -38,13 +43,11 @@ class JobConfig:
 
     @property
     def ydl_cookie_file(self) -> str | None:
-        """Returns the absolute path to the shared cookie file."""
         path = self.raw.get("yt_dlp", {}).get("cookie_file")
         return os.path.expandvars(path) if path else None
 
     @property
     def global_ydl_opts(self) -> dict:
-        """Returns extra yt-dlp options from the YAML."""
         return self.raw.get("yt_dlp", {}).get("extra_ydl_opts", {})
 
     @property
@@ -52,6 +55,10 @@ class JobConfig:
         return self._expand_path(
             self.raw.get("ia_settings", {}).get("credentials_file")
         )
+
+    @property
+    def inventory_enabled(self) -> bool:
+        return self.raw.get("inventory", {}).get("enabled", False)
 
     def get(self, *keys, default=None):
         data = self.raw

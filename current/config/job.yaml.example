@@ -10,9 +10,14 @@ ia_settings:
   # Prefix template for the Internet Archive description
   description_template: "config/description_prefix.txt"
 
+# Control toggle for the registry logic
+inventory:
+  enabled: true
+
 paths:
   data_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data"
   archive_file: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_videos.txt"
+  inventory_tsv: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_inventory.tsv"
   temp_work_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/tmp"
   telegram_helper: "${BASE_DIR}/bin/telegram-notify.sh"
 
