@@ -25,12 +25,31 @@ yt_dlp:
   # Reusing the shared cookie strategy
   cookie_file: "${BASE_DIR}/config/cookies/daghe-youtube-search-metadata.txt"
   extra_ydl_opts:
-    format: "bestvideo+bestaudio/best"
+    js_runtime: "deno"
+    # Prefer non-AI-upscaled videos, as of today identified with format_id containing "-sr"
+    format: "bestvideo[format_id!*=sr]+bestaudio/best[format_id!*=sr]"
+    subtitleslangs:
+        - "en.*"
+        - "it.*"
     writesubtitles: true
-    subtitleslangs: ["en.*", "it.*"]
     write_auto_subs: false
-    ignore_no_formats_error: true
+    ignore_no_formats_error: false
     sleep_interval_requests: 2
+    check_formats: true
+
+inventory:
+  enabled: true
+  file: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_inventory.tsv"
+  # List the columns you want.
+  # Use standard yt-dlp keys or 'ia_url' for the custom link.
+  columns:
+    - id
+    - title
+    - uploader
+    - upload_date
+    - like_count
+    - ia_url
+
 
 git:
   enabled: true
