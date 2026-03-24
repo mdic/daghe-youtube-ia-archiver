@@ -5,17 +5,22 @@ import os
 import shutil
 import socket
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
-from internetarchive import get_item, get_session, upload
+from internetarchive import get_item, get_session
 from waybackpy import WaybackMachineCDXServerAPI, WaybackMachineSaveAPI
 
 from .utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
+
+
+class TerminalThrottleError(Exception):
+    """UK English: Signifies that IA anti-abuse signals require an immediate stop."""
+
+    pass
 
 
 class YdlLogger:
@@ -35,41 +40,10 @@ class YdlLogger:
         logger.error(msg)
 
 
-def _get_ia_wait_time(response, default_backoff):
-    """UK English: Extracts wait duration from Retry-After or fallback."""
-    header = response.headers.get("Retry-After")
-    if not header:
-        return default_backoff
-    try:
-        if header.isdigit():
-            return int(header)
-        retry_date = parsedate_to_datetime(header)
-        delta = (retry_date - datetime.now(timezone.utc)).total_seconds()
-        return max(int(delta), 1)
-    except Exception:
-        return default_backoff
-
-
-def _check_ia_throttling(responses):
-    """UK English: Detects IA rate-limiting signals in response list."""
-    if not responses:
-        return False, None
-    for r in responses:
-        # Safe handling for potential None/empty response body
-        body_lower = (r.text or "").lower()
-        # Explicit detection strings from official IA guidance
-        is_limit_msg = any(
-            m in body_lower for m in ["slowdown", "reduce your request rate", "spam"]
-        )
-        if r.status_code in [429, 503] or is_limit_msg:
-            return True, r
-    return False, None
-
-
 class ArchiveProcessor:
     def __init__(self, config):
         """
-        Initialise the processor with authenticated session logic.
+        Initialise the processor with an idiomatic IA session.
         UK English spelling. Robust handling for metadata and media assets.
         """
         self.config = config
@@ -83,7 +57,7 @@ class ArchiveProcessor:
             "logger": YdlLogger(),
         }
 
-        # Merge Global YAML options
+        # Apply Global YAML options
         global_extras = self.config.global_ydl_opts
         if global_extras:
             self._apply_extra_opts(global_extras)
@@ -93,12 +67,24 @@ class ArchiveProcessor:
         if cookie_path and os.path.exists(cookie_path):
             self.ydl_opts["cookiefile"] = os.path.abspath(cookie_path)
 
-        # Initialise Internet Archive Identity via the supported public API
-        session = get_session()
+        # Initialise Internet Archive Session via public API
+        self.ia_session = get_session()
+
+        # Configure Session Identity (User-Agent)
         ua_suffix = self.config.ia_user_agent_suffix
-        current_ua = session.headers.get("User-Agent", "")
+        current_ua = self.ia_session.headers.get("User-Agent", "")
         if ua_suffix not in current_ua:
-            session.headers["User-Agent"] = f"{current_ua} {ua_suffix}".strip()
+            self.ia_session.headers["User-Agent"] = f"{current_ua} {ua_suffix}".strip()
+
+        # Configure Official HTTP Retries for Transient Errors (Category 1)
+        self.ia_session.mount_http_adapter(
+            protocol="https://", max_retries=3, status_forcelist=[500, 502, 503, 504]
+        )
+
+        # Load S3 Credentials directly into the session
+        ia_creds = self._load_ia_credentials()
+        self.ia_session.access_key = ia_creds.get("IA_ACCESS_KEY")
+        self.ia_session.secret_key = ia_creds.get("IA_SECRET_KEY")
 
     def _apply_extra_opts(self, extras: dict):
         """Standardise YAML types for the yt-dlp Python API."""
@@ -109,10 +95,6 @@ class ArchiveProcessor:
                 elif v.lower() == "false":
                     v = False
             self.ydl_opts[k] = v
-
-    def _get_ia_identifier(self, video_id: str) -> str:
-        """Ensures the ID starts with an alphanumeric character."""
-        return f"yt-{video_id}"
 
     def _load_ia_credentials(self) -> dict:
         ia_creds = {}
@@ -157,7 +139,7 @@ class ArchiveProcessor:
             return []
 
     def _archive_to_wayback(self, url: str) -> str:
-        """Customised Wayback archival loop respecting YAML timeouts."""
+        """Wayback archival loop respecting YAML timeouts."""
         if not self.config.wayback_enabled:
             return ""
 
@@ -225,6 +207,12 @@ class ArchiveProcessor:
                 logger.error(f"Template formatting error: {e}")
         return metadata_context["description"]
 
+    def _is_terminal_signal(self, text: str) -> bool:
+        """UK English: Detects IA anti-abuse/throttle signals (Category 2)."""
+        signals = ["spam", "slowdown", "reduce your request rate", "too many requests"]
+        s = text.lower()
+        return any(msg in s for msg in signals)
+
     def process_video(
         self, video_id: str, dry_run: bool = False
     ) -> tuple[bool, dict | None, str]:
@@ -234,7 +222,7 @@ class ArchiveProcessor:
         """
         work_dir = self.config.temp_work_dir.absolute() / video_id
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        ia_id = self._get_ia_identifier(video_id)
+        ia_id = f"yt-{video_id}"
 
         if dry_run:
             logger.info(f"[Dry-run] Archival simulation for: {video_id}")
@@ -245,7 +233,7 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 1. Download Media and Metadata
+            # 1. Asset Extraction (yt-dlp)
             local_opts = self.ydl_opts.copy()
             local_opts.update(
                 {
@@ -266,11 +254,10 @@ class ArchiveProcessor:
             with open(final_json_path, "w", encoding="utf-8") as f:
                 json.dump(sanitized_info, f, indent=4, ensure_ascii=False)
 
-            # 2. Wayback Machine
+            # 2. Wayback Snapshot
             wayback_url = self._archive_to_wayback(video_url)
 
-            # 3. Internet Archive Upload Preparation
-            ia_creds = self._load_ia_credentials()
+            # 3. Internet Archive Upload
             files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
             lock_path = Path(os.path.expandvars("${BASE_DIR}/data/ia_global.lock"))
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,60 +272,76 @@ class ArchiveProcessor:
                 "creator": info.get("uploader", "Unknown"),
             }
 
-            def perform_ia_upload():
-                """Scoped upload execution with configured timeout."""
-                timeout = self.config.get_timeout_setting(
-                    "ia_upload", "timeout_seconds", 600
-                )
-                logger.info(f"IA upload started for: {ia_id}")
-                return upload(
-                    identifier=ia_id,
-                    files=files_to_upload,
-                    metadata=metadata_dict,
-                    access_key=ia_creds.get("IA_ACCESS_KEY"),
-                    secret_key=ia_creds.get("IA_SECRET_KEY"),
-                    request_kwargs={"timeout": timeout},
-                )
-
-            # 4. Initial Attempt with Atomic Global Lock (DaGhE-wide IA concurrency protection)
-            with open(lock_path, "a") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
-                responses = perform_ia_upload()
-
-            # 5. Throttling and Single Retry Logic
-            is_throttled, throttled_res = _check_ia_throttling(responses)
-            if is_throttled:
-                wait_time = _get_ia_wait_time(
-                    throttled_res, self.config.ia_rate_limit_backoff
-                )
+            # 3a. Pre-upload Overload Probe
+            if self.ia_session.s3_is_overloaded():
+                backoff = self.config.ia_rate_limit_backoff
                 logger.warning(
-                    f"IA throttling detected (Status: {throttled_res.status_code}). Backoff: {wait_time}s."
+                    f"IA S3 overloaded. Pacing upload attempt with {backoff}s delay."
                 )
-                time.sleep(wait_time)
-
-                logger.info("Retry attempt started.")
-                with open(lock_path, "a") as lock_file:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX)
-                    responses = perform_ia_upload()
-
-                is_throttled, throttled_res = _check_ia_throttling(responses)
-                if is_throttled:
-                    logger.error(
-                        "Retry failed due to continued throttling -> aborting item."
+                time.sleep(backoff)
+                if (
+                    hasattr(self.ia_session, "s3_is_overloaded")
+                    and self.ia_session.s3_is_overloaded()
+                ):
+                    raise TerminalThrottleError(
+                        "IA S3 remains overloaded after pacing. Terminal stop."
                     )
-                    return False, None, ""
 
-            # 6. Final Response Validation and Polling
-            if responses and all(r.status_code == 200 for r in responses):
-                logger.info("Upload successful.")
-                self._wait_for_ia_availability(ia_id)
-                return True, info, wayback_url
-
-            logger.error(
-                f"Archival failed for {video_id}: Terminal IA error or empty response."
+            # 3b. Atomic Upload Attempt with Global Lock
+            timeout = self.config.get_timeout_setting(
+                "ia_upload", "timeout_seconds", 600
             )
-            return False, None, ""
 
+            logger.info(f"Uploading assets to IA bucket: {ia_id}")
+            try:
+                with open(lock_path, "a") as lock_file:
+                    # Atomic blocking exclusive lock across DaGhE instance
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    responses = self.ia_session.upload(
+                        identifier=ia_id,
+                        files=files_to_upload,
+                        metadata=metadata_dict,
+                        request_kwargs={"timeout": timeout},
+                    )
+            except Exception as e:
+                if self._is_terminal_signal(str(e)):
+                    raise TerminalThrottleError(
+                        f"Terminal IA anti-abuse signal in exception: {e}"
+                    )
+                logger.error(f"IA upload failed after session retries: {e}")
+                return False, None, ""
+
+            # 4. Response Evaluation
+            if not responses:
+                logger.error("IA upload returned no responses.")
+                return False, None, ""
+
+            for r in responses:
+                if r.status_code == 200:
+                    if self._is_terminal_signal(r.text):
+                        raise TerminalThrottleError(
+                            f"Terminal IA anti-abuse signal (Status {r.status_code}): {r.text}"
+                        )
+                    continue
+
+                # Terminal Anti-Abuse signals (Category 2)
+                if self._is_terminal_signal(r.text):
+                    raise TerminalThrottleError(
+                        f"Terminal IA anti-abuse signal (Status {r.status_code}): {r.text}"
+                    )
+
+                # Categorical failure (already retried if 5xx)
+                logger.error(
+                    f"IA upload failed (Status {r.status_code}): {r.text[:200]}"
+                )
+                return False, None, ""
+
+            # 5. Index Verification
+            self._wait_for_ia_availability(ia_id)
+            return True, info, wayback_url
+
+        except TerminalThrottleError:
+            raise
         except Exception as e:
             logger.error(f"Pipeline failure for {video_id}: {e}")
             return False, None, ""

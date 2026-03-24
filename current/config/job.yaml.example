@@ -9,29 +9,41 @@ ia_settings:
   credentials_file: "${BASE_DIR}/config/ia.env"
   # Prefix template for the Internet Archive description
   description_template: "config/description_prefix.txt"
-  user_agent_suffix: "DaGhE/2.x (module=daghe-youtube-ia-archiver) with internetarchive Python package"
+  # Identification suffix for official IA automated tool guidance
+  user_agent_suffix: "DaGhE/2.x (module=daghe-youtube-ia-archiver)"
 
 # Wayback Machine Configuration
 wayback:
   enabled: true
   user_agent: "DaGhE Automation Bot (Digital Preservation effort)"
 
-# Professional Throttling Configuration
+# Professional Throttling & Hardening Configuration
 timeouts:
   ia_upload:
-    timeout_seconds: 600    # 10 min per request
-    polling_seconds: 45     # Wait between checks
-    max_wait_seconds: 900   # 15 min max per item
-    inter_item_delay_seconds: 30 # Wait between separate video items
-    rate_limit_backoff_seconds: 300 # Fallback cooldown for throttling
+    timeout_seconds: 600             # 10 min per request
+    polling_seconds: 45              # Wait between indexing checks
+    max_wait_seconds: 900            # 15 min max per item
+    # Adaptive Pacing: delay = min(base + index * increment, max)
+    inter_item_delay_seconds: 30     # Base delay (seconds)
+    inter_item_increment_seconds: 10 # Increase per item in run (seconds)
+    inter_item_max_delay_seconds: 300 # Maximum delay ceiling (seconds)
+    rate_limit_backoff_seconds: 300  # Cooldown if IA throttles account or is overloaded
+
   wayback:
-    timeout_seconds: 60     # 1 min per request
-    polling_seconds: 20     # Wait between retries
-    max_wait_seconds: 450   # 7.5 min max per URL
+    timeout_seconds: 60              # 1 min per request
+    polling_seconds: 20              # Wait between retries
+    max_wait_seconds: 450            # 7.5 min max per URL
 
 # Control toggle for the registry logic
 inventory:
   enabled: true
+  columns:
+    - id
+    - title
+    - uploader
+    - upload_date
+    - like_count
+    - ia_url
 
 paths:
   data_dir: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data"
@@ -41,11 +53,9 @@ paths:
   telegram_helper: "${BASE_DIR}/bin/telegram-notify.sh"
 
 yt_dlp:
-  # Reusing the shared cookie strategy
   cookie_file: "${BASE_DIR}/config/cookies/daghe-youtube-search-metadata.txt"
   extra_ydl_opts:
     js_runtime: "deno"
-    # Prefer non-AI-upscaled videos, as of today identified with format_id containing "-sr"
     format: "bestvideo[format_id!*=sr]+bestaudio/best[format_id!*=sr]"
     merge_output_format: "mp4"
     subtitleslangs:
@@ -58,22 +68,8 @@ yt_dlp:
     check_formats: true
 
 runtime:
-  # If one video fails, continue with the rest of the playlist
+  # Continue on minor video errors, but Terminal Throttle will always halt the run
   continue_on_video_error: true
-
-inventory:
-  enabled: true
-  file: "${BASE_DIR}/jobs/daghe-youtube-ia-archiver/data/archived_inventory.tsv"
-  # List the columns you want.
-  # Use standard yt-dlp keys or 'ia_url' for the custom link.
-  columns:
-    - id
-    - title
-    - uploader
-    - upload_date
-    - like_count
-    - ia_url
-
 
 git:
   enabled: true
@@ -83,7 +79,7 @@ git:
 
 telegram:
   enabled: true
-  notify_on_success: true
+  notify_on_success: true # Backward compatible notification toggle
   level_on_success: "info"
   level_on_partial: "warning"
   level_on_failure: "error"

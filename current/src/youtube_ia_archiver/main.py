@@ -8,7 +8,7 @@ from .archive import ArchiveManager
 from .config import load_config
 from .git_ops import run_git_sync
 from .notifier import send_notification
-from .processor import ArchiveProcessor
+from .processor import ArchiveProcessor, TerminalThrottleError
 
 
 def update_inventory(config, info: dict, wayback_url: str):
@@ -74,6 +74,7 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
 
     processed = 0
     failed = []
+    halted_by_throttle = False
 
     ids = processor.get_playlist_video_ids()
     to_do = [i for i in ids if not archive.is_processed(i)]
@@ -81,51 +82,61 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     logger.info(f"Archival sequence initiated: {len(to_do)} new items.")
 
     for i, vid in enumerate(to_do):
-        success, info, wb_url = processor.process_video(vid, dry_run=dry_run)
+        try:
+            success, info, wb_url = processor.process_video(vid, dry_run=dry_run)
+            if success and not dry_run:
+                archive.add(vid)
+                update_inventory(config, info, wb_url)
+                processed += 1
+            elif not success:
+                failed.append(vid)
+        except TerminalThrottleError as e:
+            # UK English: Terminal IA signals trigger an immediate run-stop
+            logger.critical(f"Archival sequence terminated: {e}")
+            halted_by_throttle = True
+            break
 
-        if success and not dry_run:
-            archive.add(vid)
-            update_inventory(config, info, wb_url)
-            processed += 1
-        elif not success:
-            failed.append(vid)
+        # Adaptive inter-item pacing
+        if i < len(to_do) - 1:
+            base = config.ia_inter_item_delay
+            inc = config.ia_inter_item_increment
+            mx = config.ia_inter_item_max_delay
 
-        # Enforce inter-item pacing (UK English spelling)
-        if i < len(to_do) - 1:  # Skip delay after the final item
-            delay = config.ia_inter_item_delay
-            logger.info(
-                f"Pacing archival sequence: Initialising {delay}s delay before next item."
-            )
+            # Progressive delay calculation
+            delay = min(base + (i * inc), mx)
+            logger.info(f"Pacing archival sequence: {delay}s adaptive delay.")
             time.sleep(delay)
 
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
 
-    # Calculate Job Status
-    if not failed and git_success:
+    # Calculate Run Status
+    if not failed and not halted_by_throttle and git_success:
         status = "success"
     elif processed > 0:
         status = "partial"
     else:
         status = "failure"
 
-    # Notification Mapping (Coherent and backward-compatible)
-    def dispatch_notification(current_status):
-        if current_status == "success":
+    # Telegram Notification Logic
+    def notify():
+        if status == "success":
             if not config.get("telegram", "notify_on_success", default=True):
                 return
-            level = config.get("telegram", "level_on_success", default="info")
-        elif current_status == "partial":
-            level = config.get("telegram", "level_on_partial", default="warning")
+            lvl = config.get("telegram", "level_on_success", default="info")
+        elif status == "partial":
+            lvl = config.get("telegram", "level_on_partial", default="warning")
         else:
-            level = config.get("telegram", "level_on_failure", default="error")
+            lvl = config.get("telegram", "level_on_failure", default="error")
 
-        job_summary = f"Job: {config.job_name}\nArchived: {processed}\nStatus: {current_status.upper()}"
-        send_notification(config, level, job_summary)
+        msg = f"Job: {config.job_name}\nArchived: {processed}\nStatus: {status.upper()}"
+        if halted_by_throttle:
+            msg += "\nWarning: Run halted prematurely by IA throttling."
+        send_notification(config, lvl, msg)
 
     if not dry_run:
-        dispatch_notification(status)
+        notify()
 
     print(f"Job: {config.job_name}\nArchived: {processed}\nStatus: {status.upper()}")
     return 0 if status == "success" else 2

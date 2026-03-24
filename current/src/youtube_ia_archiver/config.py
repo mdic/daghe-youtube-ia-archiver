@@ -65,7 +65,6 @@ class JobConfig:
     def inventory_enabled(self) -> bool:
         return self.raw.get("inventory", {}).get("enabled", False)
 
-    # --- WAYBACK MACHINE PROPERTIES ---
     @property
     def wayback_enabled(self) -> bool:
         """UK English: Checks if Wayback Machine archival is enabled."""
@@ -75,7 +74,6 @@ class JobConfig:
     def wayback_user_agent(self) -> str:
         return self.raw.get("wayback", {}).get("user_agent", "DaGhE Bot")
 
-    # --- HARDENING & TIMING PROPERTIES ---
     @property
     def timeouts(self) -> dict:
         return self.raw.get("timeouts", {})
@@ -86,12 +84,24 @@ class JobConfig:
 
     @property
     def ia_inter_item_delay(self) -> int:
-        """UK English: Delay between separate video archival cycles."""
+        """UK English: Base delay between separate video archival cycles."""
         return self.get_timeout_setting("ia_upload", "inter_item_delay_seconds", 30)
 
     @property
+    def ia_inter_item_increment(self) -> int:
+        """UK English: Pacing increment added per item processed in a run."""
+        return self.get_timeout_setting("ia_upload", "inter_item_increment_seconds", 10)
+
+    @property
+    def ia_inter_item_max_delay(self) -> int:
+        """UK English: Maximum ceiling for adaptive inter-item pacing."""
+        return self.get_timeout_setting(
+            "ia_upload", "inter_item_max_delay_seconds", 300
+        )
+
+    @property
     def ia_rate_limit_backoff(self) -> int:
-        """UK English: Fallback delay if IA throttles without Retry-After header."""
+        """UK English: Fallback delay if IA throttles or is overloaded."""
         return self.get_timeout_setting("ia_upload", "rate_limit_backoff_seconds", 300)
 
     @property
