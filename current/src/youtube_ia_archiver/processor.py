@@ -74,7 +74,9 @@ class ArchiveProcessor:
         ua_suffix = self.config.ia_user_agent_suffix
         current_ua = self.ia_session.headers.get("User-Agent", "")
         if ua_suffix not in current_ua:
-            self.ia_session.headers["User-Agent"] = f"{current_ua} {ua_suffix}".strip()
+            self.ia_session.config["user_agent_suffix"] = (
+                f"{current_ua} {ua_suffix}".strip()
+            )
 
         # Configure Official HTTP Retries for Transient Errors (Category 1)
         self.ia_session.mount_http_adapter(
@@ -273,7 +275,10 @@ class ArchiveProcessor:
             }
 
             # 3a. Pre-upload Overload Probe
-            if self.ia_session.s3_is_overloaded():
+            if (
+                hasattr(self.ia_session, "s3_is_overloaded")
+                and self.ia_session.s3_is_overloaded()
+            ):
                 backoff = self.config.ia_rate_limit_backoff
                 logger.warning(
                     f"IA S3 overloaded. Pacing upload attempt with {backoff}s delay."
@@ -301,7 +306,8 @@ class ArchiveProcessor:
                         identifier=ia_id,
                         files=files_to_upload,
                         metadata=metadata_dict,
-                        session=self.ia_session,
+                        access_key=self.ia_session.access_key,
+                        secret_key=self.ia_session.secret_key,
                         request_kwargs={"timeout": timeout},
                     )
             except Exception as e:
