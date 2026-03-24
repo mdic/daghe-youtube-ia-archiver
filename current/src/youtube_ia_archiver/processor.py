@@ -1,14 +1,17 @@
+import fcntl
 import json
 import logging
 import os
 import shutil
 import socket
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import yt_dlp
 from internetarchive import get_item, upload
+from internetarchive.utils import get_archive_session
 from waybackpy import WaybackMachineCDXServerAPI, WaybackMachineSaveAPI
 
 from .utils import sanitize_filename
@@ -33,6 +36,36 @@ class YdlLogger:
         logger.error(msg)
 
 
+def _get_ia_wait_time(response, default_backoff):
+    """UK English: Extracts wait duration from Retry-After or fallback."""
+    header = response.headers.get("Retry-After")
+    if not header:
+        return default_backoff
+    try:
+        if header.isdigit():
+            return int(header)
+        retry_date = parsedate_to_datetime(header)
+        delta = (retry_date - datetime.now(timezone.utc)).total_seconds()
+        return max(int(delta), 1)
+    except Exception:
+        return default_backoff
+
+
+def _check_ia_throttling(responses):
+    """UK English: Detects IA rate-limiting signals in response list."""
+    if not responses:
+        return False, None
+    for r in responses:
+        # Safe handling for potential None/empty response body
+        body_lower = (r.text or "").lower()
+        is_limit_msg = any(
+            m in body_lower for m in ["slowdown", "reduce your request rate", "spam"]
+        )
+        if r.status_code in [429, 503] or is_limit_msg:
+            return True, r
+    return False, None
+
+
 class ArchiveProcessor:
     def __init__(self, config):
         """
@@ -50,15 +83,22 @@ class ArchiveProcessor:
             "logger": YdlLogger(),
         }
 
-        # Merge Global YAML options (e.g. format, js_runtime)
+        # Merge Global YAML options
         global_extras = self.config.global_ydl_opts
         if global_extras:
             self._apply_extra_opts(global_extras)
 
-        # Apply YouTube authentication via shared cookies
+        # Apply YouTube authentication
         cookie_path = self.config.ydl_cookie_file
         if cookie_path and os.path.exists(cookie_path):
             self.ydl_opts["cookiefile"] = os.path.abspath(cookie_path)
+
+        # Initialise Internet Archive Identity (User-Agent Suffix)
+        session = get_archive_session()
+        ua_suffix = self.config.ia_user_agent_suffix
+        current_ua = session.headers.get("User-Agent", "")
+        if ua_suffix not in current_ua:
+            session.headers["User-Agent"] = f"{current_ua} {ua_suffix}".strip()
 
     def _apply_extra_opts(self, extras: dict):
         """Standardise YAML types for the yt-dlp Python API."""
@@ -71,11 +111,20 @@ class ArchiveProcessor:
             self.ydl_opts[k] = v
 
     def _get_ia_identifier(self, video_id: str) -> str:
-        """Ensures the ID starts with an alphanumeric character to satisfy IA regex."""
+        """Ensures the ID starts with an alphanumeric character."""
         return f"yt-{video_id}"
 
+    def _load_ia_credentials(self) -> dict:
+        ia_creds = {}
+        if self.config.credentials_file.exists():
+            for line in self.config.credentials_file.read_text().splitlines():
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    ia_creds[k] = v.strip('"').strip("'")
+        return ia_creds
+
     def get_playlist_video_ids(self) -> list:
-        """Scans the playlist and saves metadata JSON to the data directory."""
+        """Scans the playlist and saves metadata JSON."""
         playlist_url = self.config.playlist_url
         data_dir = self.config.data_dir.absolute()
 
@@ -108,7 +157,7 @@ class ArchiveProcessor:
             return []
 
     def _archive_to_wayback(self, url: str) -> str:
-        """UK English: Customised Wayback archival loop respecting YAML timeouts."""
+        """Customised Wayback archival loop respecting YAML timeouts."""
         if not self.config.wayback_enabled:
             return ""
 
@@ -121,7 +170,6 @@ class ArchiveProcessor:
         start_time = time.time()
 
         try:
-            # Check for existing snapshots first
             cdx = WaybackMachineCDXServerAPI(url, ua)
             newest = cdx.newest()
             if newest and newest.archive_url:
@@ -130,7 +178,6 @@ class ArchiveProcessor:
         except Exception:
             pass
 
-        # Retry loop for Save Page Now
         while (time.time() - start_time) < max_wait:
             try:
                 save_api = WaybackMachineSaveAPI(url, ua)
@@ -145,7 +192,7 @@ class ArchiveProcessor:
         return "N/A"
 
     def _wait_for_ia_availability(self, identifier: str):
-        """Ensures the item is indexed by IA before concluding the task."""
+        """Ensures the item is indexed by IA before concluding."""
         max_wait = self.config.get_timeout_setting("ia_upload", "max_wait_seconds", 900)
         polling = self.config.get_timeout_setting("ia_upload", "polling_seconds", 45)
         start_time = time.time()
@@ -157,7 +204,7 @@ class ArchiveProcessor:
         return False
 
     def _prepare_description(self, info: dict) -> str:
-        """Constructs the final description using the external template."""
+        """Constructs final description using external template."""
         template_path = (
             Path(os.getcwd()).absolute()
             / self.config.raw["ia_settings"]["description_template"]
@@ -182,17 +229,15 @@ class ArchiveProcessor:
         self, video_id: str, dry_run: bool = False
     ) -> tuple[bool, dict | None, str]:
         """
-        Executes the archival pipeline for a single video.
-        Returns: (Success Boolean, Metadata Dict, Wayback URL)
+        Executes archival pipeline for a single video.
+        Returns: (Success, Metadata Dict, Wayback URL)
         """
         work_dir = self.config.temp_work_dir.absolute() / video_id
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         ia_id = self._get_ia_identifier(video_id)
 
         if dry_run:
-            logger.info(
-                f"[Dry-run] Archival simulation for: {video_id} (IA ID: {ia_id})"
-            )
+            logger.info(f"[Dry-run] Archival simulation for: {video_id}")
             return True, None, "https://web.archive.org/dryrun"
 
         if work_dir.exists():
@@ -200,7 +245,7 @@ class ArchiveProcessor:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 1. Download Media and Metadata assets
+            # 1. Download Media and Metadata
             local_opts = self.ydl_opts.copy()
             local_opts.update(
                 {
@@ -213,63 +258,89 @@ class ArchiveProcessor:
             with yt_dlp.YoutubeDL(local_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 title = info.get("title", "Unknown Title")
-
-                # Inject the real IA ID for the inventory registry
                 info["ia_identifier"] = ia_id
                 sanitized_info = ydl.sanitize_info(info)
 
-            # 2. Save Metadata JSON using a SANITISED filename
-            # This prevents titles with slashes (e.g. 'w/') from breaking the filesystem
             safe_title = sanitize_filename(title)
             final_json_path = work_dir / f"{safe_title}.json"
-
             with open(final_json_path, "w", encoding="utf-8") as f:
                 json.dump(sanitized_info, f, indent=4, ensure_ascii=False)
 
-            logger.info(f"Metadata JSON preserved as: {safe_title}.json")
-
-            # 3. Wayback Machine Archival
+            # 2. Wayback Machine
             wayback_url = self._archive_to_wayback(video_url)
 
-            # 4. Internet Archive Credentials Loading
-            ia_creds = {}
-            if self.config.credentials_file.exists():
-                for line in self.config.credentials_file.read_text().splitlines():
-                    if "=" in line:
-                        k, v = line.strip().split("=", 1)
-                        ia_creds[k] = v.strip('"').strip("'")
-
-            # 5. Upload to Internet Archive
-            logger.info(f"Uploading assets to Internet Archive bucket: {ia_id}")
+            # 3. Internet Archive Upload Preparation
+            ia_creds = self._load_ia_credentials()
             files_to_upload = [str(f) for f in work_dir.iterdir() if f.is_file()]
+            lock_path = Path(os.path.expandvars("${BASE_DIR}/data/ia_global.lock"))
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-            responses = upload(
-                identifier=ia_id,
-                files=files_to_upload,
-                metadata={
-                    "title": title,
-                    "description": self._prepare_description(info),
-                    "mediatype": "movies",
-                    "collection": self.config.get("ia_settings", "collection"),
-                    "external-identifier": f"youtube:{video_id}",
-                    "originalurl": video_url,
-                    "creator": info.get("uploader", "Unknown"),
-                },
-                access_key=ia_creds.get("IA_ACCESS_KEY"),
-                secret_key=ia_creds.get("IA_SECRET_KEY"),
-            )
+            metadata_dict = {
+                "title": title,
+                "description": self._prepare_description(info),
+                "mediatype": "movies",
+                "collection": self.config.get("ia_settings", "collection"),
+                "external-identifier": f"youtube:{video_id}",
+                "originalurl": video_url,
+                "creator": info.get("uploader", "Unknown"),
+            }
 
-            # 6. Final verification and polling
-            if all(r.status_code == 200 for r in responses):
+            def perform_ia_upload():
+                timeout = self.config.get_timeout_setting(
+                    "ia_upload", "timeout_seconds", 600
+                )
+                logger.info(f"IA upload started for: {ia_id}")
+                return upload(
+                    identifier=ia_id,
+                    files=files_to_upload,
+                    metadata=metadata_dict,
+                    access_key=ia_creds.get("IA_ACCESS_KEY"),
+                    secret_key=ia_creds.get("IA_SECRET_KEY"),
+                    request_kwargs={"timeout": timeout},
+                )
+
+            # 4. Initial Attempt with Global Lock
+            with open(lock_path, "a") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                responses = perform_ia_upload()
+
+            # 5. Throttling and Single Retry Logic
+            is_throttled, throttled_response = _check_ia_throttling(responses)
+            if is_throttled:
+                wait_time = _get_ia_wait_time(
+                    throttled_response, self.config.ia_rate_limit_backoff
+                )
+                logger.warning(
+                    f"IA throttling detected (Status: {throttled_response.status_code}). Backoff: {wait_time}s."
+                )
+                time.sleep(wait_time)
+
+                logger.info("Retry attempt started.")
+                with open(lock_path, "a") as lock_file:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    responses = perform_ia_upload()
+
+                is_throttled, throttled_response = _check_ia_throttling(responses)
+                if is_throttled:
+                    logger.error(
+                        "Retry failed due to continued throttling -> aborting item."
+                    )
+                    return False, None, ""
+
+            # 6. Final Response Validation and Polling
+            if responses and all(r.status_code == 200 for r in responses):
+                logger.info("Upload successful.")
                 self._wait_for_ia_availability(ia_id)
                 return True, info, wayback_url
 
+            logger.error(
+                f"Archival failed for {video_id}: Terminal IA error or empty response."
+            )
             return False, None, ""
 
         except Exception as e:
             logger.error(f"Pipeline failure for {video_id}: {e}")
             return False, None, ""
         finally:
-            # Cleanup workspace immediately after the attempt
             if work_dir.exists():
                 shutil.rmtree(work_dir)
