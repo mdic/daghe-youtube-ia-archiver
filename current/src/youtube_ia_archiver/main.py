@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+import time
 from logging.handlers import RotatingFileHandler
 
 from .archive import ArchiveManager
@@ -20,7 +21,6 @@ def update_inventory(config, info: dict, wayback_url: str):
         return
 
     file_exists = file_path.exists()
-    # Headers exactly as requested: YT ID, IA ID, Wayback URL, YT Title
     header = ["youtube_id", "ia_identifier", "wayback_url", "youtube_title"]
 
     video_id = info.get("id")
@@ -42,7 +42,7 @@ def update_inventory(config, info: dict, wayback_url: str):
             writer.writerow(row)
         logging.info(f"Inventory synchronised: {video_id} -> {wayback_url}")
     except Exception as e:
-        logger.error(f"TSV update failed: {e}")
+        logging.error(f"TSV update failed: {e}")
 
 
 def run_job(config_path: str, dry_run: bool, verbose: bool):
@@ -62,6 +62,7 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
         os.path.expandvars("${BASE_DIR}"), "logs", "daghe-youtube-ia-archiver.log"
     )
     try:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
         fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=3)
         fh.setFormatter(formatter)
         logger.addHandler(fh)
@@ -79,15 +80,23 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
 
     logger.info(f"Archival sequence initiated: {len(to_do)} new items.")
 
-    for vid in to_do:
-        # Success returns (True, info_dict, wayback_url)
+    for i, vid in enumerate(to_do):
         success, info, wb_url = processor.process_video(vid, dry_run=dry_run)
+
         if success and not dry_run:
             archive.add(vid)
             update_inventory(config, info, wb_url)
             processed += 1
         elif not success:
             failed.append(vid)
+
+        # Enforce inter-item pacing (UK English spelling)
+        if i < len(to_do) - 1:  # Skip delay after the final item
+            delay = config.ia_inter_item_delay
+            logger.info(
+                f"Pacing archival sequence: Initialising {delay}s delay before next item."
+            )
+            time.sleep(delay)
 
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
@@ -98,7 +107,7 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
         else ("partial" if processed > 0 else "failure")
     )
 
-    summary = f"Job: {config.get('job_name')}\nArchived: {processed}\nStatus: {status.upper()}"
+    summary = f"Job: {config.job_name}\nArchived: {processed}\nStatus: {status.upper()}"
     if not dry_run:
         send_notification(
             config,

@@ -9,6 +9,7 @@ ia_settings:
   credentials_file: "${BASE_DIR}/config/ia.env"
   # Prefix template for the Internet Archive description
   description_template: "config/description_prefix.txt"
+  user_agent_suffix: "DaGhE/2.x (module=daghe-youtube-ia-archiver) with internetarchive Python package"
 
 # Wayback Machine Configuration
 wayback:
@@ -21,6 +22,8 @@ timeouts:
     timeout_seconds: 600    # 10 min per request
     polling_seconds: 45     # Wait between checks
     max_wait_seconds: 900   # 15 min max per item
+    inter_item_delay_seconds: 30 # Wait between separate video items
+    rate_limit_backoff_seconds: 300 # Fallback cooldown for throttling
   wayback:
     timeout_seconds: 60     # 1 min per request
     polling_seconds: 20     # Wait between retries

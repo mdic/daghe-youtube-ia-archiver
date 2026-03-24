@@ -16,6 +16,10 @@ class JobConfig:
         return Path(os.path.expandvars(str(path_str)))
 
     @property
+    def job_name(self) -> str:
+        return self.raw.get("job_name", "unknown-job")
+
+    @property
     def playlist_url(self) -> str:
         return self.raw.get("playlist_url", "")
 
@@ -71,6 +75,7 @@ class JobConfig:
     def wayback_user_agent(self) -> str:
         return self.raw.get("wayback", {}).get("user_agent", "DaGhE Bot")
 
+    # --- HARDENING & TIMING PROPERTIES ---
     @property
     def timeouts(self) -> dict:
         return self.raw.get("timeouts", {})
@@ -78,6 +83,23 @@ class JobConfig:
     def get_timeout_setting(self, platform: str, key: str, default: int) -> int:
         """Retrieves specific timeout or polling intervals from config."""
         return self.timeouts.get(platform, {}).get(key, default)
+
+    @property
+    def ia_inter_item_delay(self) -> int:
+        """UK English: Delay between separate video archival cycles."""
+        return self.get_timeout_setting("ia_upload", "inter_item_delay_seconds", 30)
+
+    @property
+    def ia_rate_limit_backoff(self) -> int:
+        """UK English: Fallback delay if IA throttles without Retry-After header."""
+        return self.get_timeout_setting("ia_upload", "rate_limit_backoff_seconds", 300)
+
+    @property
+    def ia_user_agent_suffix(self) -> str:
+        """UK English: Identity string for IA automated tool identification."""
+        return self.raw.get("ia_settings", {}).get(
+            "user_agent_suffix", "DaGhE/2.x (module=daghe-youtube-ia-archiver)"
+        )
 
     def get(self, *keys, default=None):
         """Deep get utility for nested dictionaries."""
