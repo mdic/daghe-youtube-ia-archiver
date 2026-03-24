@@ -84,3 +84,6 @@ git:
 telegram:
   enabled: true
   notify_on_success: true
+  level_on_success: "info"
+  level_on_partial: "warning"
+  level_on_failure: "error"

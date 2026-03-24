@@ -40,7 +40,7 @@ def update_inventory(config, info: dict, wayback_url: str):
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
-        logging.info(f"Inventory synchronised: {video_id} -> {wayback_url}")
+        logging.info(f"Inventory synchronised: {video_id}")
     except Exception as e:
         logging.error(f"TSV update failed: {e}")
 
@@ -101,19 +101,31 @@ def run_job(config_path: str, dry_run: bool, verbose: bool):
     git_success, git_msg = (
         (True, "Skipped") if dry_run else run_git_sync(config, processed)
     )
-    status = (
-        "success"
-        if not failed and git_success
-        else ("partial" if processed > 0 else "failure")
-    )
 
-    summary = f"Job: {config.job_name}\nArchived: {processed}\nStatus: {status.upper()}"
+    # Calculate Job Status
+    if not failed and git_success:
+        status = "success"
+    elif processed > 0:
+        status = "partial"
+    else:
+        status = "failure"
+
+    # Notification Mapping (Coherent and backward-compatible)
+    def dispatch_notification(current_status):
+        if current_status == "success":
+            if not config.get("telegram", "notify_on_success", default=True):
+                return
+            level = config.get("telegram", "level_on_success", default="info")
+        elif current_status == "partial":
+            level = config.get("telegram", "level_on_partial", default="warning")
+        else:
+            level = config.get("telegram", "level_on_failure", default="error")
+
+        job_summary = f"Job: {config.job_name}\nArchived: {processed}\nStatus: {current_status.upper()}"
+        send_notification(config, level, job_summary)
+
     if not dry_run:
-        send_notification(
-            config,
-            config.get("telegram", f"level_on_{status}", default="info"),
-            summary,
-        )
+        dispatch_notification(status)
 
-    print(summary)
+    print(f"Job: {config.job_name}\nArchived: {processed}\nStatus: {status.upper()}")
     return 0 if status == "success" else 2

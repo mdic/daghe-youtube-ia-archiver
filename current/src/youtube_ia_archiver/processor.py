@@ -10,8 +10,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import yt_dlp
-from internetarchive import get_item, upload
-from internetarchive.utils import get_archive_session
+from internetarchive import get_item, get_session, upload
 from waybackpy import WaybackMachineCDXServerAPI, WaybackMachineSaveAPI
 
 from .utils import sanitize_filename
@@ -58,6 +57,7 @@ def _check_ia_throttling(responses):
     for r in responses:
         # Safe handling for potential None/empty response body
         body_lower = (r.text or "").lower()
+        # Explicit detection strings from official IA guidance
         is_limit_msg = any(
             m in body_lower for m in ["slowdown", "reduce your request rate", "spam"]
         )
@@ -93,8 +93,8 @@ class ArchiveProcessor:
         if cookie_path and os.path.exists(cookie_path):
             self.ydl_opts["cookiefile"] = os.path.abspath(cookie_path)
 
-        # Initialise Internet Archive Identity (User-Agent Suffix)
-        session = get_archive_session()
+        # Initialise Internet Archive Identity via the supported public API
+        session = get_session()
         ua_suffix = self.config.ia_user_agent_suffix
         current_ua = session.headers.get("User-Agent", "")
         if ua_suffix not in current_ua:
@@ -286,6 +286,7 @@ class ArchiveProcessor:
             }
 
             def perform_ia_upload():
+                """Scoped upload execution with configured timeout."""
                 timeout = self.config.get_timeout_setting(
                     "ia_upload", "timeout_seconds", 600
                 )
@@ -299,19 +300,19 @@ class ArchiveProcessor:
                     request_kwargs={"timeout": timeout},
                 )
 
-            # 4. Initial Attempt with Global Lock
+            # 4. Initial Attempt with Atomic Global Lock (DaGhE-wide IA concurrency protection)
             with open(lock_path, "a") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX)
                 responses = perform_ia_upload()
 
             # 5. Throttling and Single Retry Logic
-            is_throttled, throttled_response = _check_ia_throttling(responses)
+            is_throttled, throttled_res = _check_ia_throttling(responses)
             if is_throttled:
                 wait_time = _get_ia_wait_time(
-                    throttled_response, self.config.ia_rate_limit_backoff
+                    throttled_res, self.config.ia_rate_limit_backoff
                 )
                 logger.warning(
-                    f"IA throttling detected (Status: {throttled_response.status_code}). Backoff: {wait_time}s."
+                    f"IA throttling detected (Status: {throttled_res.status_code}). Backoff: {wait_time}s."
                 )
                 time.sleep(wait_time)
 
@@ -320,7 +321,7 @@ class ArchiveProcessor:
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
                     responses = perform_ia_upload()
 
-                is_throttled, throttled_response = _check_ia_throttling(responses)
+                is_throttled, throttled_res = _check_ia_throttling(responses)
                 if is_throttled:
                     logger.error(
                         "Retry failed due to continued throttling -> aborting item."
