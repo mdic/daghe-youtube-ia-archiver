@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
-from internetarchive import get_item, get_session
+from internetarchive import get_item, get_session, upload
 from waybackpy import WaybackMachineCDXServerAPI, WaybackMachineSaveAPI
 
 from .utils import sanitize_filename
@@ -297,10 +297,11 @@ class ArchiveProcessor:
                 with open(lock_path, "a") as lock_file:
                     # Atomic blocking exclusive lock across DaGhE instance
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
-                    responses = self.ia_session.upload(
+                    responses = upload(
                         identifier=ia_id,
                         files=files_to_upload,
                         metadata=metadata_dict,
+                        session=self.ia_session,
                         request_kwargs={"timeout": timeout},
                     )
             except Exception as e:
